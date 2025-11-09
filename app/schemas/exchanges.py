@@ -7,16 +7,18 @@ from app.schemas.object_id import PyObjectId
 
 Text = Annotated[str, Field(min_length=1, max_length=200, description="Non-empty text up to 200 chars")]
 ImageUrlStr = Annotated[str, Field(max_length=2048, description="Image URL as plain string")]
-
+Qnt = Annotated[int,Field(ge=0)]
 _URL = TypeAdapter(AnyUrl)  # accepts http/https, localhost, ports
 
 
 class ExchangesBase(BaseModel):
-    order_item_id: PyObjectId
+    order_id: PyObjectId
+    product_id: PyObjectId
     exchange_status_id: PyObjectId
     user_id: PyObjectId
     reason: Optional[Text] = None
     image_url: Optional[ImageUrlStr] = None
+    new_quantity: Optional[Qnt] = None
     new_size: Optional[Text] = None
 
     @field_validator("reason", "new_size", mode="before")
@@ -43,12 +45,7 @@ class ExchangesCreate(ExchangesBase):
 
 
 class ExchangesUpdate(BaseModel):
-    order_item_id: Optional[PyObjectId] = None
     exchange_status_id: Optional[PyObjectId] = None
-    user_id: Optional[PyObjectId] = None
-    reason: Optional[Text] = None
-    image_url: Optional[ImageUrlStr] = None
-    new_size: Optional[Text] = None
 
     @field_validator("reason", "new_size", mode="before")
     @classmethod

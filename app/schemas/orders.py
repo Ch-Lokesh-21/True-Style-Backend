@@ -21,12 +21,7 @@ class OrdersCreate(OrdersBase):
     pass
 
 class OrdersUpdate(BaseModel):
-    user_id: Optional[PyObjectId] = None
-    address_id: Optional[PyObjectId] = None
     status_id: Optional[PyObjectId] = None
-    total: Optional[Money] = None
-    delivery_otp: Optional[OTP] = None
-
     model_config = {"extra": "ignore"}
 
 class OrdersOut(OrdersBase):

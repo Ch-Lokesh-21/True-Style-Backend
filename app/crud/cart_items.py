@@ -86,7 +86,7 @@ async def update_one(_id: PyObjectId, payload: CartItemsUpdate) -> Optional[Cart
     Plain field update; if a change would cause a duplicate (same cart_id+product_id+size),
     let a unique index prevent conflicts (or merge in service layer if desired).
     """
-    data = {k: v for k, v in payload.model_dump(mode="python").items() if v is not None}
+    data = {k: v for k, v in payload.model_dump(mode="python",exclude_none=True).items() if v is not None}
     if not data:
         return None
 

@@ -112,7 +112,7 @@ async def update_one(_id: PyObjectId, payload: ProductsUpdate) -> Optional[Produ
         return None
 
     try:
-        data = {k: v for k, v in payload.model_dump(mode="python").items() if v is not None}
+        data = {k: v for k, v in payload.model_dump(mode="python",exclude_none=True).items() if v is not None}
 
         # Ensure FKs remain ObjectId in updates
         for fk in ("brand_id", "occasion_id", "category_id", "product_type_id"):

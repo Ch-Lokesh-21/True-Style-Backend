@@ -1,64 +1,66 @@
+# app/crud/order_items.py
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
+
 from bson import ObjectId
-
 from app.core.database import db
-from app.utils.mongo import stamp_create, stamp_update
 from app.schemas.object_id import PyObjectId
-from app.schemas.orders import OrdersCreate, OrdersUpdate, OrdersOut
+from app.schemas.order_items import OrderItemsOut
 
-COLL = "orders"
+COLL = "order_items"
 
-def _to_out(doc: dict) -> OrdersOut:
-    return OrdersOut.model_validate(doc)
 
-async def create(payload: OrdersCreate) -> OrdersOut:
-    doc = stamp_create(payload.model_dump())
-    res = await db[COLL].insert_one(doc)
-    saved = await db[COLL].find_one({"_id": res.inserted_id})
-    return _to_out(saved)
+def _to_out(doc: dict) -> OrderItemsOut:
+    return OrderItemsOut.model_validate(doc)
+
+
+def _to_oid(v: Any) -> Optional[ObjectId]:
+    try:
+        return ObjectId(str(v))
+    except Exception:
+        return None
+
+
+def _normalize_query(query: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Coerce known FK filters to ObjectId if they arrive as strings/PyObjectId."""
+    if not query:
+        return {}
+
+    out: Dict[str, Any] = {}
+    for k, v in query.items():
+        if v is None:
+            continue
+        if k in ("order_id", "user_id", "product_id"):
+            if isinstance(v, dict) and "$in" in v and isinstance(v["$in"], list):
+                out[k] = {"$in": [x for x in ( _to_oid(x) for x in v["$in"] ) if x ]}
+            else:
+                oid = _to_oid(v)
+                out[k] = oid if oid else v  # if not coercible, pass-through (won't match)
+        else:
+            out[k] = v
+    return out
+
 
 async def list_all(
     skip: int = 0,
     limit: int = 50,
     query: Dict[str, Any] | None = None,
-) -> List[OrdersOut]:
+) -> List[OrderItemsOut]:
+    q = _normalize_query(query)
     cur = (
         db[COLL]
-        .find(query or {})
-        .skip(max(skip, 0))
-        .limit(max(limit, 0))
+        .find(q)
+        .skip(max(0, int(skip)))
+        .limit(max(0, int(limit)))
         .sort("createdAt", -1)
     )
     docs = await cur.to_list(length=limit)
     return [_to_out(d) for d in docs]
 
-async def get_one(_id: PyObjectId) -> Optional[OrdersOut]:
-    try:
-        oid = ObjectId(str(_id))
-    except Exception:
+
+async def get_one(_id: PyObjectId) -> Optional[OrderItemsOut]:
+    oid = _to_oid(_id)
+    if not oid:
         return None
     doc = await db[COLL].find_one({"_id": oid})
     return _to_out(doc) if doc else None
-
-async def update_one(_id: PyObjectId, payload: OrdersUpdate) -> Optional[OrdersOut]:
-    try:
-        oid = ObjectId(str(_id))
-    except Exception:
-        return None
-
-    data = {k: v for k, v in payload.model_dump().items() if v is not None}
-    if not data:
-        return None
-
-    await db[COLL].update_one({"_id": oid}, {"$set": stamp_update(data)})
-    doc = await db[COLL].find_one({"_id": oid})
-    return _to_out(doc) if doc else None
-
-async def delete_one(_id: PyObjectId) -> Optional[bool]:
-    try:
-        oid = ObjectId(str(_id))
-    except Exception:
-        return None
-    r = await db[COLL].delete_one({"_id": oid})
-    return r.deleted_count == 1

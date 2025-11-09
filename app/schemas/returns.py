@@ -12,11 +12,13 @@ _URL = TypeAdapter(AnyUrl)  # validates http/https, localhost, ports
 
 
 class ReturnsBase(BaseModel):
-    order_item_id: PyObjectId
+    order_id: PyObjectId
+    product_id: PyObjectId
     return_status_id: PyObjectId
     user_id: PyObjectId
     reason: Optional[str] = None
     image_url: Optional[ImageUrlStr] = None
+    quantity: int
     amount: Optional[Money] = None
 
     @field_validator("reason", mode="before")
@@ -44,29 +46,7 @@ class ReturnsCreate(ReturnsBase):
 
 
 class ReturnsUpdate(BaseModel):
-    order_item_id: Optional[PyObjectId] = None
     return_status_id: Optional[PyObjectId] = None
-    user_id: Optional[PyObjectId] = None
-    reason: Optional[str] = None
-    image_url: Optional[ImageUrlStr] = None
-    amount: Optional[Money] = None
-
-    @field_validator("reason", mode="before")
-    @classmethod
-    def _normalize_reason(cls, v):
-        if isinstance(v, str):
-            v = v.strip()
-            if v == "":
-                raise ValueError("reason must not be empty when provided.")
-        return v
-
-    @field_validator("image_url", mode="before")
-    @classmethod
-    def _validate_image_url(cls, v):
-        if v is None:
-            return v
-        return str(_URL.validate_python(v))
-
     model_config = {"extra": "ignore"}
 
 

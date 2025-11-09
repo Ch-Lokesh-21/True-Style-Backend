@@ -49,7 +49,6 @@ async def create_item(
 @router.get(
     "/",
     response_model=List[TestimonialsOut],
-    dependencies=[Depends(require_permission("testimonials","Read"))],
 )
 async def list_items(
     skip: int = Query(0, ge=0),
@@ -65,7 +64,6 @@ async def list_items(
 @router.get(
     "/{item_id}",
     response_model=TestimonialsOut,
-    dependencies=[Depends(require_permission("testimonials","Read"))],
 )
 async def get_item(item_id: PyObjectId):
     try:

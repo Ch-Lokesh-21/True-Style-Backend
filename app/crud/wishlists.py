@@ -47,7 +47,7 @@ async def update_one(_id: PyObjectId, payload: WishlistsUpdate) -> Optional[Wish
     except Exception:
         return None
 
-    data = {k: v for k, v in payload.model_dump(mode="python").items() if v is not None}
+    data = {k: v for k, v in payload.model_dump(mode="python",exclude_none=True).items() if v is not None}
     if not data:
         return None  # caller decides 400 vs 404
 

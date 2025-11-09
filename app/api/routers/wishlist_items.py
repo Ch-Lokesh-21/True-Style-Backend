@@ -1,10 +1,9 @@
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
-from bson import ObjectId
 
 from app.api.deps import require_permission, get_current_user
 from app.core.database import db
@@ -158,7 +157,7 @@ async def move_item(
                         "product_id": product_id,
                         "size": normalized_size,
                         "quantity": 0,  # becomes 1 via $inc
-                        "createdAt": datetime.utcnow(),
+                        "createdAt": datetime.now(timezone.utc),
                     },
                     "$inc": {"quantity": 1},
                     "$currentDate": {"updatedAt": True},

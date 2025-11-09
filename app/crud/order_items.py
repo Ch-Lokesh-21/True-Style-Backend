@@ -13,7 +13,7 @@ def _to_out(doc: dict) -> OrderItemsOut:
     return OrderItemsOut.model_validate(doc)
 
 async def create(payload: OrderItemsCreate) -> OrderItemsOut:
-    doc = stamp_create(payload.model_dump())
+    doc = stamp_create(payload.model_dump(mode="python"))
     res = await db[COLL].insert_one(doc)
     saved = await db[COLL].find_one({"_id": res.inserted_id})
     return _to_out(saved)
@@ -47,7 +47,7 @@ async def update_one(_id: PyObjectId, payload: OrderItemsUpdate) -> Optional[Ord
     except Exception:
         return None
 
-    data = {k: v for k, v in payload.model_dump().items() if v is not None}
+    data = {k: v for k, v in payload.model_dump(mode="python",exclude_none=True).items() if v is not None}
     if not data:
         return None
 

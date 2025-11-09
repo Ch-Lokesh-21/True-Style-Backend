@@ -1,3 +1,4 @@
+# app/crud/upi_details.py
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
 from bson import ObjectId
@@ -12,64 +13,68 @@ COLL = "upi_details"
 def _to_out(doc: dict) -> UpiDetailsOut:
     return UpiDetailsOut.model_validate(doc)
 
-async def create(payload: UpiDetailsCreate) -> UpiDetailsOut:
+def _to_oid(v: Any) -> Optional[ObjectId]:
     try:
-        doc = stamp_create(payload.model_dump())
-        res = await db[COLL].insert_one(doc)
-        saved = await db[COLL].find_one({"_id": res.inserted_id})
-        return _to_out(saved)
-    except Exception as e:
-        raise e
+        return ObjectId(str(v))
+    except Exception:
+        return None
+
+async def create(payload: UpiDetailsCreate) -> UpiDetailsOut:
+    """
+    INTERNAL: used by Orders transaction to save UPI details.
+    """
+    doc = stamp_create(payload.model_dump(mode="python"))
+    res = await db[COLL].insert_one(doc)
+    saved = await db[COLL].find_one({"_id": res.inserted_id})
+    return _to_out(saved)
 
 async def list_all(skip: int = 0, limit: int = 50, query: Dict[str, Any] | None = None) -> List[UpiDetailsOut]:
-    try:
-        cur = (
-            db[COLL]
-            .find(query or {})
-            .skip(max(skip, 0))
-            .limit(max(limit, 0))
-            .sort("createdAt", -1)
-        )
-        docs = await cur.to_list(length=limit)
-        return [_to_out(d) for d in docs]
-    except Exception as e:
-        raise e
+    cur = (
+        db[COLL]
+        .find(query or {})
+        .skip(max(skip, 0))
+        .limit(max(limit, 0))
+        .sort("createdAt", -1)
+    )
+    docs = await cur.to_list(length=limit)
+    return [_to_out(d) for d in docs]
 
 async def get_one(_id: PyObjectId) -> Optional[UpiDetailsOut]:
-    try:
-        oid = ObjectId(str(_id))
-    except Exception:
+    oid = _to_oid(_id)
+    if not oid:
         return None
-    try:
-        doc = await db[COLL].find_one({"_id": oid})
-        return _to_out(doc) if doc else None
-    except Exception as e:
-        raise e
+    doc = await db[COLL].find_one({"_id": oid})
+    return _to_out(doc) if doc else None
+
+async def get_by_payment_id(payment_id: PyObjectId) -> Optional[UpiDetailsOut]:
+    pid = _to_oid(payment_id)
+    if not pid:
+        return None
+    doc = await db[COLL].find_one({"payment_id": pid})
+    return _to_out(doc) if doc else None
 
 async def update_one(_id: PyObjectId, payload: UpiDetailsUpdate) -> Optional[UpiDetailsOut]:
-    try:
-        oid = ObjectId(str(_id))
-    except Exception:
+    """
+    INTERNAL: generally not exposed via routes; prefer Orders-owned lifecycle.
+    """
+    oid = _to_oid(_id)
+    if not oid:
         return None
 
-    data = {k: v for k, v in payload.model_dump().items() if v is not None}
+    data = payload.model_dump(mode="python", exclude_none=True)
     if not data:
         return None
 
-    try:
-        await db[COLL].update_one({"_id": oid}, {"$set": stamp_update(data)})
-        doc = await db[COLL].find_one({"_id": oid})
-        return _to_out(doc) if doc else None
-    except Exception as e:
-        raise e
+    await db[COLL].update_one({"_id": oid}, {"$set": stamp_update(data)})
+    doc = await db[COLL].find_one({"_id": oid})
+    return _to_out(doc) if doc else None
 
 async def delete_one(_id: PyObjectId) -> Optional[bool]:
-    try:
-        oid = ObjectId(str(_id))
-    except Exception:
+    """
+    INTERNAL: generally not exposed via routes; prefer Orders-owned lifecycle.
+    """
+    oid = _to_oid(_id)
+    if not oid:
         return None
-    try:
-        r = await db[COLL].delete_one({"_id": oid})
-        return r.deleted_count == 1
-    except Exception as e:
-        raise e
+    r = await db[COLL].delete_one({"_id": oid})
+    return r.deleted_count == 1

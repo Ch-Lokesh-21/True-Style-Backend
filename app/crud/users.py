@@ -71,7 +71,7 @@ async def update_one(_id: PyObjectId, payload: UserUpdate | Dict[str, Any]) -> O
     except Exception:
         return None
 
-    data = payload.model_dump(mode="python") if isinstance(payload, UserUpdate) else dict(payload)
+    data = payload.model_dump(mode="python",exclude_none=True) if isinstance(payload, UserUpdate) else dict(payload)
     data = {k: v for k, v in data.items() if v is not None}
     if not data:
         return None

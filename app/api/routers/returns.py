@@ -1,167 +1,263 @@
+# app/api/routes/returns.py
 from __future__ import annotations
-from typing import List, Optional
-from urllib.parse import urlparse
+from typing import List, Optional, Dict, Any, Tuple
+from datetime import datetime, timezone
 
+from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 
-from app.api.deps import user_required, admin_required
+from app.api.deps import require_permission, get_current_user
+from app.core.database import db
 from app.schemas.object_id import PyObjectId
 from app.schemas.returns import ReturnsCreate, ReturnsUpdate, ReturnsOut
 from app.crud import returns as crud
-from app.utils.gridfs import upload_image, replace_image, delete_image
+from app.utils.gridfs import upload_image
 
 router = APIRouter()
 
+# -------------- helpers --------------
 
-def _extract_file_id_from_url(url: Optional[str]) -> Optional[str]:
-    """Extract GridFS file_id from URLs like .../files/<id>[?...]."""
-    if not url:
-        return None
-    p = urlparse(url)
-    path = p.path or ""
-    parts = path.split("/files/", 1)
-    if len(parts) != 2 or not parts[1]:
-        return None
-    return parts[1].split("/")[0]
+def _to_oid(v: Any, field: str) -> ObjectId:
+    try:
+        return ObjectId(str(v))
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Invalid {field}")
 
+async def _get_status_id(label: str) -> ObjectId:
+    doc = await db["return_status"].find_one({"status": label})
+    if not doc:
+        raise HTTPException(status_code=500, detail=f"Return status '{label}' not found")
+    return doc["_id"]
+
+async def _load_order_item(oi_id: PyObjectId) -> dict:
+    oi = await db["order_items"].find_one({"_id": _to_oid(oi_id, "order_item_id")})
+    if not oi:
+        raise HTTPException(status_code=404, detail="Order item not found")
+    return oi
+
+async def _load_order(order_id: ObjectId) -> dict:
+    order = await db["orders"].find_one({"_id": order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return order
+
+async def _load_product(product_id: ObjectId) -> dict:
+    prod = await db["products"].find_one({"_id": product_id})
+    if not prod:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return prod
+
+async def _already_returned_qty(order_id: ObjectId, product_id: ObjectId) -> int:
+    pipeline = [
+        {"$match": {"order_id": order_id, "product_id": product_id}},
+        {"$group": {"__id": None, "q": {"$sum": {"$ifNull": ["$quantity", 0]}}}},
+    ]
+    total = 0
+    async for row in db["returns"].aggregate(pipeline):
+        total = int(row.get("q", 0))
+    return total
+
+def _price_of(prod: dict) -> float:
+    # prefer total_price if present, else price, else 0.0
+    val = prod.get("total_price", prod.get("price", 0.0))
+    try:
+        return float(val)
+    except Exception:
+        return 0.0
+
+# -------------- routes --------------
 
 @router.post(
     "/",
     response_model=ReturnsOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(admin_required)],
+    dependencies=[Depends(require_permission("returns", "Create"))],
 )
-async def create_item(
-    order_id: str = Form(...),
-    product_id: str = Form(...),
-    return_status_id: int = Form(...),
-    user_id: str = Form(...),
+async def create_return(
+    order_item_id: PyObjectId = Form(...),
+    quantity: int = Form(..., description="Quantity to return"),
     reason: Optional[str] = Form(None),
-    amount: Optional[float] = Form(None),
-    image: Optional[UploadFile] = File(None),   # optional file upload
-    image_url: Optional[str] = Form(None),      # or direct URL
+    image: UploadFile = File(None),
+    current_user: Dict = Depends(get_current_user),
 ):
     """
-    Create return. If an image file is provided, store in GridFS and set image_url accordingly.
+    User creates a return for an order item they own.
+    - Validates ownership and available quantity (ordered - already returned).
+    - Computes amount from product price * quantity.
+    - Sets return_status to 'requested'.
+    - Accepts either file upload (stored via GridFS) or direct image_url (string).
     """
-    try:
-        final_url = image_url
-        if image is not None:
-            _, final_url = await upload_image(image)
+    if quantity <= 0:
+        raise HTTPException(status_code=400, detail="quantity must be greater than 0")
 
-        payload = ReturnsCreate(
-            order_id=order_id,
-            product_id=product_id,
-            return_status_id=return_status_id,
-            user_id=user_id,
-            reason=reason,
-            image_url=final_url,
-            amount=amount,
+    # Load order_item + linked order/product
+    oi = await _load_order_item(order_item_id)
+    order_id: ObjectId = oi["order_id"]
+    product_id: ObjectId = oi["product_id"]
+    ordered_qty: int = int(oi.get("quantity", 0))
+
+    order = await _load_order(order_id)
+    # ownership guard
+    if str(order.get("user_id")) != str(current_user.get("user_id")):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # ensure quantity is available considering previously created returns
+    prior = await _already_returned_qty(order_id, product_id)
+    available = max(0, ordered_qty - prior)
+    if quantity > available:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only {available} items can be returned for this order item",
         )
+
+    prod = await _load_product(product_id)
+    unit_price = _price_of(prod)
+    amount = round(unit_price * quantity, 2)
+
+    # image handling
+    if image is not None:
+        _, final_url = await upload_image(image)
+
+    status_id = await _get_status_id("requested")
+
+    payload = ReturnsCreate(
+        order_id=order_id,
+        product_id=product_id,
+        return_status_id=status_id,
+        user_id=_to_oid(current_user["user_id"], "user_id"),
+        reason=reason,
+        image_url=final_url,
+        quantity=quantity,
+        amount=amount,
+    )
+
+    try:
         return await crud.create(payload)
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create Return: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create return: {e}")
 
+# ---------- USER: list & get my returns ----------
 
-@router.get("/", response_model=List[ReturnsOut], dependencies=[Depends(user_required)])
-async def list_items(
+@router.get(
+    "/my",
+    response_model=List[ReturnsOut],
+    dependencies=[Depends(require_permission("returns", "Read"))],
+)
+async def list_my_returns(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
+    current_user: Dict = Depends(get_current_user),
 ):
     try:
-        return await crud.list_all(skip=skip, limit=limit)
+        q = {"user_id": _to_oid(current_user["user_id"], "user_id")}
+        return await crud.list_all(skip=skip, limit=limit, query=q)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list Returns: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list returns: {e}")
 
-
-@router.get("/{item_id}", response_model=ReturnsOut, dependencies=[Depends(user_required)])
-async def get_item(item_id: PyObjectId):
+@router.get(
+    "/my/{return_id}",
+    response_model=ReturnsOut,
+    dependencies=[Depends(require_permission("returns", "Read"))],
+)
+async def get_my_return(
+    return_id: PyObjectId,
+    current_user: Dict = Depends(get_current_user),
+):
     try:
-        d = await crud.get_one(item_id)
-        if not d:
-            raise HTTPException(404, "Return not found")
-        return d
+        item = await crud.get_one(return_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Return not found")
+        if str(item.user_id) != str(current_user["user_id"]):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return item
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get Return: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get return: {e}")
 
+# ---------- ADMIN: list/get/update/delete ----------
 
-@router.put("/{item_id}", response_model=ReturnsOut, dependencies=[Depends(admin_required)])
-async def update_item(
-    item_id: PyObjectId,
-    order_id: Optional[str] = Form(None),
-    product_id: Optional[str] = Form(None),
-    return_status_id: Optional[int] = Form(None),
-    user_id: Optional[str] = Form(None),
-    reason: Optional[str] = Form(None),
-    amount: Optional[float] = Form(None),
-    image: Optional[UploadFile] = File(None),   # optional new file
-    image_url: Optional[str] = Form(None),      # or direct URL override
+@router.get(
+    "/",
+    response_model=List[ReturnsOut],
+    dependencies=[Depends(require_permission("returns", "Read", "admin"))],
+)
+async def admin_list_returns(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    user_id: Optional[PyObjectId] = Query(None),
+    order_id: Optional[PyObjectId] = Query(None),
+    product_id: Optional[PyObjectId] = Query(None),
+    return_status_id: Optional[PyObjectId] = Query(None),
+):
+    try:
+        q: Dict[str, Any] = {}
+        if user_id is not None:
+            q["user_id"] = _to_oid(user_id, "user_id")
+        if order_id is not None:
+            q["order_id"] = _to_oid(order_id, "order_id")
+        if product_id is not None:
+            q["product_id"] = _to_oid(product_id, "product_id")
+        if return_status_id is not None:
+            q["return_status_id"] = _to_oid(return_status_id, "return_status_id")
+        return await crud.list_all(skip=skip, limit=limit, query=q or None)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list returns: {e}")
+
+@router.get(
+    "/{return_id}",
+    response_model=ReturnsOut,
+    dependencies=[Depends(require_permission("returns", "Read", "admin"))],
+)
+async def admin_get_return(return_id: PyObjectId):
+    try:
+        item = await crud.get_one(return_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Return not found")
+        return item
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get return: {e}")
+
+@router.put(
+    "/{return_id}/status",
+    response_model=ReturnsOut,
+    dependencies=[Depends(require_permission("returns", "Update", "admin"))],
+)
+async def admin_update_return_status(
+    return_id: PyObjectId,
+    payload: ReturnsUpdate,
 ):
     """
-    Update return. File upload (if provided) replaces the old GridFS file and updates image_url.
-    If only image_url is given, we just update the URL (no GridFS operation).
+    Admin can update only the status (per your ReturnsUpdate schema).
     """
     try:
-        current = await crud.get_one(item_id)
-        if not current:
-            raise HTTPException(404, "Return not found")
-
-        patch = ReturnsUpdate()
-
-        if image is not None:
-            old_id = _extract_file_id_from_url(current.image_url)
-            _, new_url = await replace_image(old_id, image)
-            patch.image_url = new_url
-        elif image_url is not None:
-            patch.image_url = image_url
-
-        if order_id is not None:
-            patch.order_id = order_id
-        if product_id is not None:
-            patch.product_id = product_id
-        if return_status_id is not None:
-            patch.return_status_id = return_status_id
-        if user_id is not None:
-            patch.user_id = user_id
-        if reason is not None:
-            patch.reason = reason
-        if amount is not None:
-            patch.amount = amount
-
-        if not any(v is not None for v in patch.model_dump().values()):
-            raise HTTPException(status_code=400, detail="No fields provided for update")
-
-        updated = await crud.update_one(item_id, patch)
+        if payload.return_status_id is None:
+            raise HTTPException(status_code=400, detail="return_status_id is required")
+        updated = await crud.update_one(return_id, payload)
         if not updated:
-            raise HTTPException(status_code=409, detail="Update failed")
+            raise HTTPException(status_code=404, detail="Return not found or not updated")
         return updated
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update Return: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update return: {e}")
 
-
-@router.delete("/{item_id}", dependencies=[Depends(admin_required)])
-async def delete_item(item_id: PyObjectId):
+@router.delete(
+    "/{return_id}",
+    dependencies=[Depends(require_permission("returns", "Delete"))]
+)
+async def admin_delete_return(return_id: PyObjectId):
     try:
-        current = await crud.get_one(item_id)
-        if not current:
-            raise HTTPException(404, "Return not found")
-
-        file_id = _extract_file_id_from_url(current.image_url)
-        if file_id:
-            await delete_image(file_id)
-
-        ok = await crud.delete_one(item_id)
+        ok = await crud.delete_one(return_id)
         if not ok:
-            raise HTTPException(404, "Return not found")
+            raise HTTPException(status_code=404, detail="Return not found")
         return JSONResponse(status_code=200, content={"deleted": True})
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete Return: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete return: {e}")

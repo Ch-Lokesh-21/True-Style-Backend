@@ -35,13 +35,7 @@ class PaymentsCreate(PaymentsBase):
 
 
 class PaymentsUpdate(BaseModel):
-    user_id: Optional[PyObjectId] = None
-    order_id: Optional[PyObjectId] = None
-    payment_types_id: Optional[PyObjectId] = None
     payment_status_id: Optional[PyObjectId] = None
-    invoice_no: Optional[Invoice] = None
-    delivery_fee: Optional[Money] = None
-    amount: Optional[Money] = None
 
     @field_validator("invoice_no", mode="before")
     @classmethod

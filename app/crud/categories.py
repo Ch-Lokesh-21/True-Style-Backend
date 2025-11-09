@@ -60,7 +60,7 @@ async def get_one(_id: PyObjectId) -> Optional[CategoriesOut]:
 
 
 async def update_one(_id: PyObjectId, payload: CategoriesUpdate) -> Optional[CategoriesOut]:
-    data = {k: v for k, v in payload.model_dump(mode="python").items() if v is not None}
+    data = {k: v for k, v in payload.model_dump(mode="python",exclude_none=True).items() if v is not None}
     if not data:
         return None
 

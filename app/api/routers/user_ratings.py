@@ -15,7 +15,6 @@ from app.crud import user_ratings as crud
 
 router = APIRouter()  # mounted in main.py at prefix="/user-ratings"
 
-
 # ---------------------------
 # Create: user can rate self
 # ---------------------------
@@ -27,18 +26,16 @@ router = APIRouter()  # mounted in main.py at prefix="/user-ratings"
 )
 async def create_item(payload: UserRatingsCreate, current_user: Dict = Depends(get_current_user)):
     try:
-        item_user_id = str(payload.user_id)
-        current_user_id = str(current_user["user_id"])
-        if item_user_id != current_user_id:
+        if str(payload.user_id) != str(current_user["user_id"]):
             raise HTTPException(status_code=403, detail="Forbidden")
 
-        # transactional create + product rating recompute
         return await crud.create_with_recalc(payload)
     except HTTPException:
         raise
     except Exception as e:
+        if "E11000" in str(e):
+            raise HTTPException(status_code=409, detail="You already rated this product")
         raise HTTPException(status_code=500, detail=f"Failed to create user rating: {e}")
-
 
 # ---------------------------------------
 # List all (admin / anyone with Read perm)
@@ -46,32 +43,31 @@ async def create_item(payload: UserRatingsCreate, current_user: Dict = Depends(g
 @router.get(
     "/",
     response_model=List[UserRatingsOut],
-    dependencies=[Depends(require_permission("user_ratings", "Read"))],
+    dependencies=[Depends(require_permission("user_ratings", "Read","admin"))],
 )
 async def list_items(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
-    product_id: Optional[str] = Query(None, description="Filter by product_id"),
-    user_id: Optional[str] = Query(None, description="Filter by user_id"),
+    product_id: Optional[PyObjectId] = Query(None, description="Filter by product_id"),
+    user_id: Optional[PyObjectId] = Query(None, description="Filter by user_id"),
 ):
     try:
         q: Dict[str, Any] = {}
-        if product_id:
+        if product_id is not None:
             q["product_id"] = product_id
-        if user_id:
+        if user_id is not None:
             q["user_id"] = user_id
         return await crud.list_all(skip=skip, limit=limit, query=q or None)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list user ratings: {e}")
 
-
 # -------------------------------------------
-# Get (admin-like) by rating _id (unchanged)
+# Get by rating _id
 # -------------------------------------------
 @router.get(
     "/{item_id}",
     response_model=UserRatingsOut,
-    dependencies=[Depends(require_permission("user_ratings", "Read"))],
+    dependencies=[Depends(require_permission("user_ratings", "Read","admin"))],
 )
 async def get_item(item_id: PyObjectId):
     try:
@@ -84,19 +80,20 @@ async def get_item(item_id: PyObjectId):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get user rating: {e}")
 
-
 # -------------------------------------------------------
-# NEW: Get the current user's rating for a product (me)
+# Get the current user's rating for a product (me)
 # -------------------------------------------------------
 @router.get(
     "/by-product/{product_id}/me",
     response_model=UserRatingsOut,
     dependencies=[Depends(require_permission("user_ratings", "Read"))],
 )
-async def get_my_rating_for_product(product_id: str, current_user: Dict = Depends(get_current_user)):
+async def get_my_rating_for_product(product_id: PyObjectId, current_user: Dict = Depends(get_current_user)):
     try:
-        user_id = str(current_user["user_id"])
-        item = await crud.get_by_user_and_product(user_id=user_id, product_id=product_id)
+        item = await crud.get_by_user_and_product(
+            user_id=current_user["user_id"],
+            product_id=product_id,
+        )
         if not item:
             raise HTTPException(status_code=404, detail="User rating not found")
         return item
@@ -104,7 +101,6 @@ async def get_my_rating_for_product(product_id: str, current_user: Dict = Depend
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get user rating: {e}")
-
 
 # -----------------------------------------------
 # Update (owner guard) with transactional recalc
@@ -119,7 +115,6 @@ async def update_item(item_id: PyObjectId, payload: UserRatingsUpdate, current_u
         if not any(v is not None for v in payload.model_dump().values()):
             raise HTTPException(status_code=400, detail="No fields provided for update")
 
-        # Owner check: only the same user who created the rating can update it
         existing = await crud.get_one(item_id)
         if not existing:
             raise HTTPException(status_code=404, detail="User rating not found")
@@ -133,8 +128,9 @@ async def update_item(item_id: PyObjectId, payload: UserRatingsUpdate, current_u
     except HTTPException:
         raise
     except Exception as e:
+        if "E11000" in str(e):
+            raise HTTPException(status_code=409, detail="A rating for this product by this user already exists")
         raise HTTPException(status_code=500, detail=f"Failed to update user rating: {e}")
-
 
 # -----------------------------------------------
 # Delete (owner guard) with transactional recalc

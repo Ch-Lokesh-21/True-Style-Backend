@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     REFRESH_COOKIE_SAMESITE: str 
     REFRESH_COOKIE_MAX_AGE_DAYS: int 
     TOKEN_HASH_PEPPER: str 
-
+    BACKUP_BASE_PATH: str
     CARD_ENC_KEY: str
     class Config:
         env_file = ".env"

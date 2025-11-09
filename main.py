@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.middleware.logging import RequestLoggingMiddleware
 from contextlib import asynccontextmanager
 from app.core.config import settings
 from app.core.database import db, Base, engine, close_engine, close_mongo_connection
@@ -19,9 +20,10 @@ prefix = settings.API_V1_PREFIX
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    """Create database tables and start Redis connection on FastAPI startup,
+    and close them on shutdown."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        print("Tables created")
     await db["token_revocations"].create_index("expiresAt", expireAfterSeconds=0)
     await db["sessions"].create_index("refresh_hash", unique=True)
     await db["sessions"].create_index("user_id")
@@ -33,14 +35,21 @@ async def lifespan(app: FastAPI):
     await close_mongo_connection()
     await close_redis()
     await close_engine()
+    
+    """
+    Initialize Fastapi with swagger redirect url to hanle custom login
+    """
 app = FastAPI(
-                title=settings.PROJECT_NAME,
-                servers=[{"url": "http://localhost:8000"}],
-                swagger_ui_oauth2_redirect_url="/docs/oauth2-redirect",
-                docs_url=None,
-                lifespan=lifespan
-            )
+    title=settings.PROJECT_NAME,
+    servers=[{"url": "http://localhost:8000"}],
+    swagger_ui_oauth2_redirect_url="/docs/oauth2-redirect",
+    docs_url=None,
+    lifespan=lifespan
+)
 
+""" Added CORS Middle ware to allow cross origin resouce sharing
+    Currently in development so allowed all origins, methods, headers, with credentials
+"""
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -48,6 +57,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+"""Custom middle to print meta data of request and computation time for each request"""
+app.add_middleware(RequestLoggingMiddleware)
+
+
+"""Over ridding inbuilt swagger/ui to add drop down for filtering routes based on tags"""
 @app.get("/docs", include_in_schema=False)
 def custom_docs():
     html = """
@@ -161,6 +176,8 @@ modal.querySelectorAll('*').forEach(el => {
     </html>
     """
     return HTMLResponse(content=html)
+
+"""Adding all the routes to FastAPI instance"""
 
 app.include_router(auth.router, prefix=f"{prefix}/auth", tags=["Auth"])
 app.include_router(users.router, prefix=f"{prefix}/users", tags=["Users"])

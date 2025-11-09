@@ -8,7 +8,7 @@ from bson import ObjectId
 from pymongo.errors import OperationFailure
 
 from app.core.config import settings
-
+from app.core.security import hash_password
 # Execute `python -m scripts.seed`
 # -----------------------
 # Safe index creation
@@ -354,6 +354,60 @@ async def seed_lookup_collections(db):
                 upsert=True,
             )
 
+# Initial credentials
+async def seed_initial_users(db):
+    now = datetime.now(timezone.utc)
+
+    # --- fetch role and status ids ---
+    admin_role = await db["user_roles"].find_one({"role": "admin"})
+    user_role = await db["user_roles"].find_one({"role": "user"})
+    active_status = await db["user_status"].find_one({"status": "active"})
+
+    if not admin_role or not user_role or not active_status:
+        print("Missing roles/status. Run lookup + RBAC seeding first.")
+        return
+
+    admin_role_id = admin_role["_id"]
+    user_role_id = user_role["_id"]
+    active_status_id = active_status["_id"]
+
+    # --- admin credential ---
+    admin_email = "truestyle419@gmail.com"
+    existing_admin = await db["users"].find_one({"email": admin_email})
+    if not existing_admin:
+        await db["users"].insert_one({
+            "first_name": "True",
+            "last_name": "Style",
+            "email": admin_email,
+            "country_code":"+91",
+            "phone_no": "1234567890",
+            "password": hash_password("Truestyle*1234"),   # <--- hashed
+            "role_id": admin_role_id,
+            "user_status_id": active_status_id,
+            "createdAt": now,
+            "updatedAt": now,
+        })
+    else:
+        print("✅ Admin already exists, skipped")
+
+    # --- normal user credential ---
+    user_email = "lokeshchirumamilla59@gmail.com"
+    existing_user = await db["users"].find_one({"email": user_email})
+    if not existing_user:
+        await db["users"].insert_one({
+            "first_name": "Lokesh",
+            "last_name": "Chirumamilla",
+            "email": user_email,
+            "country_code":"+91",
+            "phone_no": "8978739281",
+            "password": hash_password("Truestyle*1234"),   # <--- hashed
+            "role_id": user_role_id,
+            "user_status_id": active_status_id,
+            "createdAt": now,
+            "updatedAt": now,
+        })
+    else:
+        print("User already exists, skipped")
 
 # -----------------------
 # Main
@@ -371,8 +425,11 @@ async def main():
 
         # 3) RBAC
         await seed_rbac(db)
+        
+        # Initial Credentials
+        await seed_initial_users(db)
 
-        print("Seed complete: indexes, lookups, and RBAC populated.")
+        print("Seed complete: indexes, lookups, RBAC and initial credentials populated .")
     except Exception as e:
         print(f"Error during seeding: {e}")
     finally:

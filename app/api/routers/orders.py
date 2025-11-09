@@ -128,6 +128,14 @@ async def place_order(
 
     user_oid = _to_oid(user_id, "user_id")
     addr_doc = await _get_address_for_user(address_id, user_id)
+    order_address = {
+        "mobile_no": addr_doc["mobile_no"],
+        "postal_code": addr_doc["postal_code"],
+        "country": addr_doc["country"],
+        "state": addr_doc["state"],
+        "city": addr_doc["city"],
+        "address": addr_doc["address"]
+    }
     pay_type_doc = await _get_payment_type_doc(payment_type_id)
 
     ptype = str(pay_type_doc.get("type", "")).strip().lower()
@@ -201,7 +209,7 @@ async def place_order(
             # --- B) Create order ---
             order_payload = OrdersCreate(
                 user_id=user_id,
-                address=addr_doc,         # embed address snapshot
+                address=order_address,         # embed address snapshot
                 status_id=order_status_doc["_id"],
                 total=order_total,
                 delivery_otp=None,

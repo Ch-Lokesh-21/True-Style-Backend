@@ -87,6 +87,7 @@ async def login_service(response: Response, request: Request, body: LoginIn) -> 
             "cart_id": str(cart["_id"]),
             "type": "access_payload",
         }
+
         at = create_access_token(payload)
         rt = create_refresh_token(
             {
@@ -144,7 +145,7 @@ async def register_service(payload: RegisterIn) -> UserOut:
         role = await db["user_roles"].find_one({"role": "user"})
         if not role:
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Default user role not found")
-        role_id = role["_id"]
+        role_id = str(role["_id"])
 
         status_doc = await db["user_status"].find_one({"status": "active"})
         if not status_doc:

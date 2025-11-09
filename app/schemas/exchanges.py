@@ -47,21 +47,6 @@ class ExchangesCreate(ExchangesBase):
 class ExchangesUpdate(BaseModel):
     exchange_status_id: Optional[PyObjectId] = None
 
-    @field_validator("reason", "new_size", mode="before")
-    @classmethod
-    def _trim_text(cls, v):
-        if isinstance(v, str):
-            v = v.strip()
-            if v == "":
-                raise ValueError("Field must not be empty when provided.")
-        return v
-
-    @field_validator("image_url", mode="before")
-    @classmethod
-    def _validate_image_url(cls, v):
-        if v is None:
-            return v
-        return str(_URL.validate_python(v))
 
     model_config = {"extra": "ignore"}
 

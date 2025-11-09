@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     REDIS_HOST : str
     PERM_CACHE_TTL_SECONDS: int
     GRIDFS_BUCKET: str
+    POSTGRESQL_URI: str
     BACKEND_BASE_URL: str
     UPLOAD_MAX_BYTES: int
     UPLOAD_ALLOWED_TYPES: str

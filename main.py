@@ -2,10 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.core.config import settings
-from app.core.database import db
-from app.core.redis import clear_permissions_cache
-from app.core.database import close_mongo_connection    
-from app.core.redis import close_redis
+from app.core.database import db, Base, engine, close_engine, close_mongo_connection
+from app.core.redis import clear_permissions_cache, close_redis
 from fastapi.responses import HTMLResponse
 from app.api.routers import (
     auth, users,
@@ -15,14 +13,32 @@ from app.api.routers import (
     terms_and_conditions, store_details, products, product_images, wishlist_items,
     cart_items, user_address, orders, order_items, user_reviews, user_ratings,
     returns, exchanges, payments, card_details, upi_details, coupons, 
-    backup_logs, restore_logs , files, address
+    backup_logs, restore_logs , files, address , contact_us, logs
 )
 prefix = settings.API_V1_PREFIX
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        print("Tables created")
+    await db["token_revocations"].create_index("expiresAt", expireAfterSeconds=0)
+    await db["sessions"].create_index("refresh_hash", unique=True)
+    await db["sessions"].create_index("user_id")
+    await clear_permissions_cache()
+
+    yield  # <--- app runs while this yields
+
+    # Shutdown
+    await close_mongo_connection()
+    await close_redis()
+    await close_engine()
 app = FastAPI(
                 title=settings.PROJECT_NAME,
                 servers=[{"url": "http://localhost:8000"}],
                 swagger_ui_oauth2_redirect_url="/docs/oauth2-redirect",
-                docs_url=None
+                docs_url=None,
+                lifespan=lifespan
             )
 
 app.add_middleware(
@@ -107,6 +123,9 @@ modal.querySelectorAll('*').forEach(el => {
                             <optioin value="Files">Files</option>
                             <optioin value="Coupons">Coupons</option>
                             <option value="Payments">Payments</option>
+                            <option value="Logs">Logs</option>
+                            <option value="Contact Us">Contact Us</option>
+
                         `;
 
                         
@@ -187,22 +206,12 @@ app.include_router(upi_details.router, prefix=f"{prefix}/upi-details", tags=["Pa
 app.include_router(coupons.router, prefix=f"{prefix}/coupons", tags=["Coupons"])
 app.include_router(backup_logs.router, prefix=f"{prefix}/backup-logs", tags=["Backup"])
 app.include_router(restore_logs.router, prefix=f"{prefix}/restore-logs", tags=["Restore"])
+app.include_router(contact_us.router, prefix=f"{prefix}/contact-us", tags=["Contact Us"])
+app.include_router(logs.router, prefix=f"{prefix}/logs", tags=["Logs"])
+
 
 @app.get("/",tags=["Root"])
 async def root():
     return {"message": f"{settings.PROJECT_NAME} is running"}
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
-    await db["token_revocations"].create_index("expiresAt", expireAfterSeconds=0)
-    await db["sessions"].create_index("refresh_hash", unique=True)
-    await db["sessions"].create_index("user_id")
-    await clear_permissions_cache()
-
-    yield  # <--- app runs while this yields
-
-    # Shutdown
-    await close_mongo_connection()
-    await close_redis()

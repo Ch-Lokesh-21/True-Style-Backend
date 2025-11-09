@@ -37,15 +37,6 @@ class PaymentsCreate(PaymentsBase):
 class PaymentsUpdate(BaseModel):
     payment_status_id: Optional[PyObjectId] = None
 
-    @field_validator("invoice_no", mode="before")
-    @classmethod
-    def _trim_invoice(cls, v):
-        if isinstance(v, str):
-            v = v.strip()
-            if not v:
-                raise ValueError("invoice_no must not be empty when provided.")
-        return v
-
     model_config = {"extra": "ignore"}
 
 

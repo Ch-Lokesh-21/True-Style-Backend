@@ -14,7 +14,7 @@ from app.api.routers import (
     terms_and_conditions, store_details, products, product_images, wishlist_items,
     cart_items, user_address, orders, order_items, user_reviews, user_ratings,
     returns, exchanges, payments, card_details, upi_details, coupons, 
-    backup_logs, restore_logs , files, address , contact_us, logs
+    backup_logs, restore_logs , files, address , contact_us, logs, dashboard
 )
 prefix = settings.API_V1_PREFIX
 @asynccontextmanager
@@ -140,6 +140,7 @@ modal.querySelectorAll('*').forEach(el => {
                             <option value="Payments">Payments</option>
                             <option value="Logs">Logs</option>
                             <option value="Contact Us">Contact Us</option>
+                            <option value="Dashboard">Dashboard</option>
 
                         `;
 
@@ -225,7 +226,7 @@ app.include_router(backup_logs.router, prefix=f"{prefix}/backup-logs", tags=["Ba
 app.include_router(restore_logs.router, prefix=f"{prefix}/restore-logs", tags=["Restore"])
 app.include_router(contact_us.router, prefix=f"{prefix}/contact-us", tags=["Contact Us"])
 app.include_router(logs.router, prefix=f"{prefix}/logs", tags=["Logs"])
-
+app.include_router(dashboard.router, prefix=f"{prefix}/dashboard", tags=["Dashboard"])
 
 @app.get("/",tags=["Root"])
 async def root():

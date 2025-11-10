@@ -71,7 +71,6 @@ async def login_service(response: Response, request: Request, body: LoginIn) -> 
         user_status = await db["user_status"].find_one({"status":"blocked"})
         if str(user["user_status_id"])==str(user_status["_id"]):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "User account is suspended")
-
         # update last login (UTC)
         await db["users"].update_one(
             {"_id": user["_id"]},
@@ -97,7 +96,6 @@ async def login_service(response: Response, request: Request, body: LoginIn) -> 
                 "cart_id": payload["cart_id"]
             }
         )
-
         sess = {
             "user_id": payload["user_id"],
             "jti": rt["jti"],

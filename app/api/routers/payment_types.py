@@ -1,7 +1,12 @@
+"""
+Routes for Payment Types.
+- Thin HTTP layer: parses/validates inputs, applies RBAC, and delegates to the service layer.
+"""
+
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import JSONResponse
 
 from app.api.deps import require_permission
@@ -11,17 +16,15 @@ from app.schemas.payment_types import (
     PaymentTypesUpdate,
     PaymentTypesOut,
 )
-from app.crud import payment_types as crud
+from app.services.payment_types import (
+    create_item_service,
+    list_items_service,
+    get_item_service,
+    update_item_service,
+    delete_item_service,
+)
 
 router = APIRouter()  # mount in main.py with prefix="/payment-types"
-
-
-def _raise_conflict_if_dup(err: Exception, field_hint: Optional[str] = None):
-    msg = str(err)
-    if "E11000" in msg:
-        detail = "Duplicate key." if not field_hint else f"Duplicate {field_hint}."
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
-    raise err
 
 
 @router.post(
@@ -31,15 +34,19 @@ def _raise_conflict_if_dup(err: Exception, field_hint: Optional[str] = None):
     dependencies=[Depends(require_permission("payment_types", "Create"))],
 )
 async def create_item(payload: PaymentTypesCreate):
-    try:
-        return await crud.create(payload)
-    except HTTPException:
-        raise
-    except Exception as e:
-        try:
-            _raise_conflict_if_dup(e, field_hint="idx or type")
-        except Exception as e2:
-            raise HTTPException(status_code=500, detail=f"Failed to create payment type: {e2}")
+    """
+    Create a payment type.
+
+    Args:
+        payload: PaymentTypesCreate.
+
+    Returns:
+        PaymentTypesOut
+
+    Raises:
+        409 on duplicate (idx or type), if unique index exists.
+    """
+    return await create_item_service(payload)
 
 
 @router.get(
@@ -52,13 +59,21 @@ async def list_items(
     limit: int = Query(50, ge=1, le=200),
     type_q: Optional[str] = Query(None, description="Filter by exact type"),
 ):
-    try:
-        q: Dict[str, Any] = {}
-        if type_q:
-            q["type"] = type_q
-        return await crud.list_all(skip=skip, limit=limit, query=q or None)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list payment types: {e}")
+    """
+    List payment types with optional exact `type` filter.
+
+    Args:
+        skip: Pagination offset.
+        limit: Page size.
+        type_q: Optional exact match on the `type` field.
+
+    Returns:
+        List[PaymentTypesOut]
+    """
+    q: Dict[str, Any] = {}
+    if type_q:
+        q["type"] = type_q
+    return await list_items_service(skip=skip, limit=limit, query=q or None)
 
 
 @router.get(
@@ -67,15 +82,19 @@ async def list_items(
     dependencies=[Depends(require_permission("payment_types", "Read"))],
 )
 async def get_item(item_id: PyObjectId):
-    try:
-        item = await crud.get_one(item_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="Payment type not found")
-        return item
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get payment type: {e}")
+    """
+    Get a single payment type by id.
+
+    Args:
+        item_id: Payment type ObjectId.
+
+    Returns:
+        PaymentTypesOut
+
+    Raises:
+        404 if not found.
+    """
+    return await get_item_service(item_id)
 
 
 @router.put(
@@ -84,20 +103,22 @@ async def get_item(item_id: PyObjectId):
     dependencies=[Depends(require_permission("payment_types", "Update"))],
 )
 async def update_item(item_id: PyObjectId, payload: PaymentTypesUpdate):
-    try:
-        if not any(v is not None for v in payload.model_dump().values()):
-            raise HTTPException(status_code=400, detail="No fields provided for update")
-        updated = await crud.update_one(item_id, payload)
-        if not updated:
-            raise HTTPException(status_code=404, detail="Payment type not found or not updated")
-        return updated
-    except HTTPException:
-        raise
-    except Exception as e:
-        try:
-            _raise_conflict_if_dup(e, field_hint="idx or type")
-        except Exception as e2:
-            raise HTTPException(status_code=500, detail=f"Failed to update payment type: {e2}")
+    """
+    Update a payment type.
+
+    Args:
+        item_id: Payment type ObjectId.
+        payload: PaymentTypesUpdate (must include at least one field).
+
+    Returns:
+        PaymentTypesOut
+
+    Raises:
+        400 if no fields provided.
+        404 if not found.
+        409 on duplicate (idx or type).
+    """
+    return await update_item_service(item_id=item_id, payload=payload)
 
 
 @router.delete(
@@ -105,21 +126,18 @@ async def update_item(item_id: PyObjectId, payload: PaymentTypesUpdate):
     dependencies=[Depends(require_permission("payment_types", "Delete"))],
 )
 async def delete_item(item_id: PyObjectId):
-    try:
-        ok = await crud.delete_one(item_id)
+    """
+    Delete a payment type.
 
-        if ok is None:
-            raise HTTPException(status_code=400, detail="Invalid payment type ID.")
+    Delete semantics (per CRUD contract):
+      - If `ok is None`: ID invalid → 400.
+      - If `ok is False`: type in use by payments → 400.
+      - If `ok is True`: return 200 with {"deleted": True}.
 
-        if ok is False:
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot delete this payment type because one or more payments are using it.",
-            )
+    Args:
+        item_id: Payment type ObjectId.
 
-        return JSONResponse(status_code=200, content={"deleted": True})
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete payment type: {e}")
+    Returns:
+        JSONResponse({"deleted": True})
+    """
+    return await delete_item_service(item_id)

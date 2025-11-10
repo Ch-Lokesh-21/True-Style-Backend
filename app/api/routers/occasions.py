@@ -1,30 +1,26 @@
+"""
+Routes for managing Occasions.
+- Parses requests, applies RBAC, and delegates business logic to the service layer.
+"""
+
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import JSONResponse
 
 from app.api.deps import require_permission
 from app.schemas.object_id import PyObjectId
 from app.schemas.occasions import OccasionsCreate, OccasionsUpdate, OccasionsOut
-from app.crud import occasions as crud
-from app.utils.gridfs import delete_image, _extract_file_id_from_url
+from app.services.occasions import (
+    create_item_service,
+    list_items_service,
+    get_item_service,
+    update_item_service,
+    delete_item_service,
+)
 
 router = APIRouter()  # mounted from main.py at /occasions
-
-
-async def _cleanup_gridfs_urls(urls: list[str]) -> list[str]:
-    """Best-effort deletion of GridFS files using their URLs. Returns warnings (non-fatal)."""
-    warnings: list[str] = []
-    for url in urls or []:
-        try:
-            fid = _extract_file_id_from_url(url)
-            if not fid:
-                continue
-            await delete_image(fid)
-        except Exception as ex:
-            warnings.append(f"{url}: {ex}")
-    return warnings
 
 
 @router.post(
@@ -34,17 +30,16 @@ async def _cleanup_gridfs_urls(urls: list[str]) -> list[str]:
     dependencies=[Depends(require_permission("occasions", "Create"))]
 )
 async def create_item(payload: OccasionsCreate):
-    try:
-        created = await crud.create(payload)
-        if not created:
-            raise HTTPException(status_code=500, detail="Failed to persist occasion")
-        return created
-    except HTTPException:
-        raise
-    except Exception as e:
-        if "E11000" in str(e):
-            raise HTTPException(status_code=409, detail="Duplicate occasion")
-        raise HTTPException(status_code=500, detail=f"Failed to create occasion: {e}")
+    """
+    Create a new occasion.
+
+    Args:
+        payload: OccasionsCreate schema.
+
+    Returns:
+        OccasionsOut
+    """
+    return await create_item_service(payload)
 
 
 @router.get("/", response_model=List[OccasionsOut])
@@ -54,23 +49,36 @@ async def list_items(
     occasion: Optional[str] = Query(None, description="Filter by exact occasion"),
     q: Optional[str] = Query(None, description="Case-insensitive fuzzy search on occasion"),
 ):
-    try:
-        return await crud.list_all(skip=skip, limit=limit,occasion=occasion, q=q)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list occasions: {e}")
+    """
+    List occasions with pagination and optional filters.
+
+    Args:
+        skip: Pagination offset.
+        limit: Page size.
+        occasion: Exact match filter.
+        q: Fuzzy (regex) search on `occasion`.
+
+    Returns:
+        List[OccasionsOut]
+    """
+    return await list_items_service(skip=skip, limit=limit, occasion=occasion, q=q)
 
 
 @router.get("/{item_id}", response_model=OccasionsOut)
 async def get_item(item_id: PyObjectId):
-    try:
-        item = await crud.get_one(item_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="Occasion not found")
-        return item
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get occasion: {e}")
+    """
+    Get a single occasion by ID.
+
+    Args:
+        item_id: Occasion ObjectId.
+
+    Returns:
+        OccasionsOut
+
+    Raises:
+        404 if not found.
+    """
+    return await get_item_service(item_id)
 
 
 @router.put(
@@ -79,19 +87,22 @@ async def get_item(item_id: PyObjectId):
     dependencies=[Depends(require_permission("occasions", "Update"))]
 )
 async def update_item(item_id: PyObjectId, payload: OccasionsUpdate):
-    try:
-        if not any(v is not None for v in payload.model_dump().values()):
-            raise HTTPException(status_code=400, detail="No fields provided for update")
-        updated = await crud.update_one(item_id, payload)
-        if not updated:
-            raise HTTPException(status_code=404, detail="Occasion not found")
-        return updated
-    except HTTPException:
-        raise
-    except Exception as e:
-        if "E11000" in str(e):
-            raise HTTPException(status_code=409, detail="Duplicate occasion")
-        raise HTTPException(status_code=500, detail=f"Failed to update occasion: {e}")
+    """
+    Update an occasion.
+
+    Args:
+        item_id: Occasion ObjectId.
+        payload: OccasionsUpdate schema (must contain at least one field).
+
+    Returns:
+        OccasionsOut
+
+    Raises:
+        400 if no fields provided.
+        404 if not found.
+        409 on duplicate occasion.
+    """
+    return await update_item_service(item_id=item_id, payload=payload)
 
 
 @router.delete(
@@ -102,20 +113,11 @@ async def delete_item(item_id: PyObjectId):
     """
     Transactionally delete an occasion and all its products + related documents.
     After commit, best-effort delete all related GridFS files (product thumbnails + product_images).
-    """
-    try:
-        result = await crud.delete_one_cascade(item_id)
-        if not result or result["status"] == "not_found":
-            raise HTTPException(status_code=404, detail="Occasion not found")
-        if result["status"] != "deleted":
-            raise HTTPException(status_code=500, detail="Failed to delete occasion")
 
-        warnings = await _cleanup_gridfs_urls(result.get("image_urls", []))
-        payload: Dict[str, Any] = {"deleted": True, "stats": result.get("stats", {})}
-        if warnings:
-            payload["file_cleanup_warnings"] = warnings
-        return JSONResponse(status_code=200, content=payload)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete occasion: {e}")
+    Args:
+        item_id: Occasion ObjectId.
+
+    Returns:
+        JSONResponse: {"deleted": True, "stats": {...}, "file_cleanup_warnings": [...]?}
+    """
+    return await delete_item_service(item_id)

@@ -1,14 +1,24 @@
+"""
+Routes for managing How-It-Works entries.
+- Parses requests, applies RBAC, and delegates business logic to the service layer.
+"""
+
 from __future__ import annotations
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, Query, status, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 
 from app.api.deps import require_permission
 from app.schemas.object_id import PyObjectId
-from app.schemas.how_it_works import HowItWorksCreate, HowItWorksUpdate, HowItWorksOut
-from app.crud import how_it_works as crud
-from app.utils.gridfs import upload_image, replace_image, delete_image, _extract_file_id_from_url
+from app.schemas.how_it_works import HowItWorksUpdate, HowItWorksOut
+from app.services.how_it_works import (
+    create_item_service,
+    list_items_service,
+    get_item_service,
+    update_item_service,
+    delete_item_service,
+)
 
 router = APIRouter()
 
@@ -22,20 +32,24 @@ router = APIRouter()
 async def create_item(
     idx: int = Form(...),
     title: str = Form(...),
-    image: UploadFile = File(...),
+    image: UploadFile = File(None),
 ):
-    """Create HowItWorks: stream image to GridFS and store image_url."""
-    try:
-        _, url = await upload_image(image)
-        payload = HowItWorksCreate(idx=idx, image_url=url, title=title)
-        created = await crud.create(payload)
-        return created
-    except HTTPException:
-        raise
-    except Exception as e:
-        if "E11000" in str(e) and "idx" in str(e):
-            raise HTTPException(status_code=409, detail="Duplicate idx.")
-        raise HTTPException(status_code=500, detail=f"Failed to create HowItWorks: {e}")
+    """
+    Create a How-It-Works entry.
+
+    Notes:
+    - If `image` is provided, it will be streamed to GridFS and `image_url` stored.
+    - Business rule: image is required; the service returns 400 if omitted.
+
+    Args:
+        idx: Display/index order.
+        title: Card title.
+        image: Image file to upload (required by business rule).
+
+    Returns:
+        HowItWorksOut
+    """
+    return await create_item_service(idx=idx, title=title, image=image)
 
 
 @router.get("/", response_model=List[HowItWorksOut])
@@ -44,23 +58,35 @@ async def list_items(
     limit: int = Query(50, ge=1, le=200),
     sort_by_idx: bool = Query(True, description="Sort by idx asc; fallback createdAt desc"),
 ):
-    try:
-        return await crud.list_all(skip=skip, limit=limit, sort_by_idx=sort_by_idx)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list HowItWorks: {e}")
+    """
+    List How-It-Works entries with pagination.
+
+    Args:
+        skip: Offset for pagination.
+        limit: Page size.
+        sort_by_idx: Whether to sort by idx ascending.
+
+    Returns:
+        List[HowItWorksOut]
+    """
+    return await list_items_service(skip=skip, limit=limit, sort_by_idx=sort_by_idx)
 
 
 @router.get("/{item_id}", response_model=HowItWorksOut)
 async def get_item(item_id: PyObjectId):
-    try:
-        d = await crud.get_one(item_id)
-        if not d:
-            raise HTTPException(status_code=404, detail="HowItWorks not found")
-        return d
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get HowItWorks: {e}")
+    """
+    Get a single How-It-Works entry by ID.
+
+    Args:
+        item_id: ObjectId of the entry.
+
+    Returns:
+        HowItWorksOut
+
+    Raises:
+        404 if not found.
+    """
+    return await get_item_service(item_id)
 
 
 @router.put(
@@ -75,39 +101,23 @@ async def update_item(
     image: UploadFile = File(None),
 ):
     """
-    Update idx/title; if image provided, replace in GridFS and update image_url.
+    Update `idx`/`title`; if `image` is provided, the old GridFS file is replaced and `image_url` updated.
+
+    Args:
+        item_id: Entry ObjectId.
+        idx: Optional new display order.
+        title: Optional new title.
+        image: Optional new image file.
+
+    Returns:
+        HowItWorksOut
+
+    Raises:
+        400 if no fields provided.
+        404 if not found.
+        409 on duplicate idx (if unique).
     """
-    try:
-        current = await crud.get_one(item_id)
-        if not current:
-            raise HTTPException(status_code=404, detail="HowItWorks not found")
-
-        patch = HowItWorksUpdate()
-        if image is not None:
-            old_id = _extract_file_id_from_url(current.image_url)
-            if old_id:
-                _, new_url = await replace_image(old_id, image)
-            else:
-                _, new_url = await upload_image(image)
-            patch.image_url = new_url  # type: ignore[attr-defined]
-        if idx is not None:
-            patch.idx = idx
-        if title is not None:
-            patch.title = title
-
-        if not any(v is not None for v in patch.model_dump().values()):
-            raise HTTPException(status_code=400, detail="No fields provided for update")
-
-        updated = await crud.update_one(item_id, patch)
-        if not updated:
-            raise HTTPException(status_code=409, detail="Update failed (possibly duplicate idx).")
-        return updated
-    except HTTPException:
-        raise
-    except Exception as e:
-        if "E11000" in str(e) and "idx" in str(e):
-            raise HTTPException(status_code=409, detail="Duplicate idx.")
-        raise HTTPException(status_code=500, detail=f"Failed to update HowItWorks: {e}")
+    return await update_item_service(item_id=item_id, idx=idx, title=title, image=image)
 
 
 @router.delete(
@@ -115,20 +125,13 @@ async def update_item(
     dependencies=[Depends(require_permission("how_it_works", "Delete"))]
 )
 async def delete_item(item_id: PyObjectId):
-    try:
-        current = await crud.get_one(item_id)
-        if not current:
-            raise HTTPException(status_code=404, detail="HowItWorks not found")
+    """
+    Delete an entry and its GridFS image if present.
 
-        file_id = _extract_file_id_from_url(current.image_url)
-        if file_id:
-            await delete_image(file_id)
+    Args:
+        item_id: Entry ObjectId.
 
-        ok = await crud.delete_one(item_id)
-        if not ok:
-            raise HTTPException(status_code=404, detail="HowItWorks not found")
-        return JSONResponse(status_code=200, content={"deleted": True})
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete HowItWorks: {e}")
+    Returns:
+        JSONResponse: {"deleted": True}
+    """
+    return await delete_item_service(item_id)

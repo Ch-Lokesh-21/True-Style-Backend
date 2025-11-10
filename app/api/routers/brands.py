@@ -7,28 +7,15 @@ from fastapi.responses import JSONResponse
 from app.api.deps import require_permission
 from app.schemas.object_id import PyObjectId
 from app.schemas.brands import BrandsCreate, BrandsUpdate, BrandsOut
-from app.crud import brands as crud
-from app.utils.gridfs import delete_image, _extract_file_id_from_url
+from app.services.brands import (
+    create_item_service,
+    list_items_service,
+    get_item_service,
+    update_item_service,
+    delete_item_service,
+)
 
 router = APIRouter()
-
-
-async def _cleanup_gridfs_urls(urls: list[str]) -> list[str]:
-    """
-    Best-effort deletion of GridFS files using their URLs.
-    Returns a list of warnings (non-fatal errors).
-    """
-    warnings: list[str] = []
-    for url in urls or []:
-        try:
-            fid = _extract_file_id_from_url(url)
-            if not fid:
-                continue
-            await delete_image(fid)
-        except Exception as ex:
-            warnings.append(f"{url}: {ex}")
-    return warnings
-
 
 @router.post(
     "/",
@@ -44,19 +31,7 @@ async def _cleanup_gridfs_urls(urls: list[str]) -> list[str]:
     },
 )
 async def create_item(payload: BrandsCreate):
-    try:
-        created = await crud.create(payload)
-        if not created:
-            raise HTTPException(status_code=500, detail="Failed to persist brand")
-        return created
-    except HTTPException:
-        raise
-    except Exception as e:
-        msg = str(e)
-        if "E11000" in msg:
-            raise HTTPException(status_code=409, detail="Duplicate brand")
-        raise HTTPException(status_code=500, detail=f"Failed to create brand: {e}")
-
+    return await create_item_service(payload)
 
 @router.get(
     "/",
@@ -73,12 +48,7 @@ async def list_items(
     name: Optional[str] = Query(None, description="Exact match filter for brand name"),
     q: Optional[str] = Query(None, description="Case-insensitive search on name"),
 ):
-    """List brands with pagination, supports either exact `name` or fuzzy `q` (regex) search."""
-    try:
-        return await crud.list_all(skip=skip, limit=limit, name=name, q=q)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list brands: {e}")
-
+    return await list_items_service(skip=skip, limit=limit, name=name, q=q)
 
 @router.get(
     "/{item_id}",
@@ -90,16 +60,7 @@ async def list_items(
     },
 )
 async def get_item(item_id: PyObjectId):
-    try:
-        item = await crud.get_one(item_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="Brand not found")
-        return item
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get brand: {e}")
-
+    return await get_item_service(item_id)
 
 @router.put(
     "/{item_id}",
@@ -114,22 +75,7 @@ async def get_item(item_id: PyObjectId):
     },
 )
 async def update_item(item_id: PyObjectId, payload: BrandsUpdate):
-    try:
-        if not any(v is not None for v in payload.model_dump().values()):
-            raise HTTPException(status_code=400, detail="No fields provided for update")
-
-        updated = await crud.update_one(item_id, payload)
-        if updated is None:
-            raise HTTPException(status_code=404, detail="Brand not found")
-        return updated
-    except HTTPException:
-        raise
-    except Exception as e:
-        msg = str(e)
-        if "E11000" in msg:
-            raise HTTPException(status_code=409, detail="Duplicate brand")
-        raise HTTPException(status_code=500, detail=f"Failed to update brand: {e}")
-
+    return await update_item_service(item_id, payload)
 
 @router.delete(
     "/{item_id}",
@@ -141,26 +87,4 @@ async def update_item(item_id: PyObjectId, payload: BrandsUpdate):
     },
 )
 async def delete_item(item_id: PyObjectId):
-    """
-    Transactionally delete a brand and all its products + related documents.
-    After commit, best-effort delete all related GridFS files (product thumbnails + product_images).
-    """
-    try:
-        result = await crud.delete_one_cascade(item_id)
-        if not result or result["status"] == "not_found":
-            raise HTTPException(status_code=404, detail="Brand not found")
-        if result["status"] != "deleted":
-            raise HTTPException(status_code=500, detail="Failed to delete brand")
-
-        warnings = await _cleanup_gridfs_urls(result.get("image_urls", []))
-        payload: Dict[str, Any] = {
-            "deleted": True,
-            "stats": result.get("stats", {}),
-        }
-        if warnings:
-            payload["file_cleanup_warnings"] = warnings
-        return JSONResponse(status_code=200, content=payload)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete brand: {e}")
+    return await delete_item_service(item_id)

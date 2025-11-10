@@ -1,13 +1,24 @@
+"""
+Routes for Order Status.
+- Parses requests, applies RBAC, and delegates business logic to the service layer.
+"""
+
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import JSONResponse
 
 from app.api.deps import require_permission
 from app.schemas.object_id import PyObjectId
 from app.schemas.order_status import OrderStatusCreate, OrderStatusUpdate, OrderStatusOut
-from app.crud import order_status as crud
+from app.services.order_status import (
+    create_item_service,
+    list_items_service,
+    get_item_service,
+    update_item_service,
+    delete_item_service,
+)
 
 router = APIRouter()  # mounted in main.py at /order-status
 
@@ -19,14 +30,19 @@ router = APIRouter()  # mounted in main.py at /order-status
     dependencies=[Depends(require_permission("order_status", "Create"))]
 )
 async def create_item(payload: OrderStatusCreate):
-    try:
-        return await crud.create(payload)
-    except Exception as e:
-        msg = str(e)
-        if "E11000" in msg:
-            # if you later add a unique index on idx or status
-            raise HTTPException(status_code=409, detail="Duplicate order status")
-        raise HTTPException(status_code=500, detail=f"Failed to create order status: {e}")
+    """
+    Create an order status.
+
+    Args:
+        payload: OrderStatusCreate schema.
+
+    Returns:
+        OrderStatusOut
+
+    Raises:
+        409 on duplicate status (if a unique index exists).
+    """
+    return await create_item_service(payload)
 
 
 @router.get(
@@ -39,13 +55,21 @@ async def list_items(
     limit: int = Query(50, ge=1, le=200),
     status_q: Optional[str] = Query(None, description="Filter by exact status"),
 ):
-    try:
-        q: Dict[str, Any] = {}
-        if status_q:
-            q["status"] = status_q
-        return await crud.list_all(skip=skip, limit=limit, query=q or None)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list order status: {e}")
+    """
+    List order statuses with optional exact `status` filter.
+
+    Args:
+        skip: Pagination offset.
+        limit: Page size.
+        status_q: Optional exact match on status field.
+
+    Returns:
+        List[OrderStatusOut]
+    """
+    q: Dict[str, Any] = {}
+    if status_q:
+        q["status"] = status_q
+    return await list_items_service(skip=skip, limit=limit, query=q or None)
 
 
 @router.get(
@@ -54,15 +78,19 @@ async def list_items(
     dependencies=[Depends(require_permission("order_status", "Read"))]
 )
 async def get_item(item_id: PyObjectId):
-    try:
-        item = await crud.get_one(item_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="Order status not found")
-        return item
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get order status: {e}")
+    """
+    Get a single order status by id.
+
+    Args:
+        item_id: Order status ObjectId.
+
+    Returns:
+        OrderStatusOut
+
+    Raises:
+        404 if not found.
+    """
+    return await get_item_service(item_id)
 
 
 @router.put(
@@ -71,20 +99,22 @@ async def get_item(item_id: PyObjectId):
     dependencies=[Depends(require_permission("order_status", "Update"))]
 )
 async def update_item(item_id: PyObjectId, payload: OrderStatusUpdate):
-    try:
-        if not any(v is not None for v in payload.model_dump().values()):
-            raise HTTPException(status_code=400, detail="No fields provided for update")
-        updated = await crud.update_one(item_id, payload)
-        if not updated:
-            raise HTTPException(status_code=404, detail="Order status not found or not updated")
-        return updated
-    except HTTPException:
-        raise
-    except Exception as e:
-        msg = str(e)
-        if "E11000" in msg:
-            raise HTTPException(status_code=409, detail="Duplicate order status")
-        raise HTTPException(status_code=500, detail=f"Failed to update order status: {e}")
+    """
+    Update an order status.
+
+    Args:
+        item_id: Order status ObjectId.
+        payload: OrderStatusUpdate schema (must include at least one field).
+
+    Returns:
+        OrderStatusOut
+
+    Raises:
+        400 if no fields provided.
+        404 if not found.
+        409 on duplicate status/index.
+    """
+    return await update_item_service(item_id=item_id, payload=payload)
 
 
 @router.delete(
@@ -92,20 +122,18 @@ async def update_item(item_id: PyObjectId, payload: OrderStatusUpdate):
     dependencies=[Depends(require_permission("order_status", "Delete"))]
 )
 async def delete_item(item_id: PyObjectId):
-    try:
-        ok = await crud.delete_one(item_id)
+    """
+    Delete an order status.
 
-        if ok is None:
-            raise HTTPException(status_code=400, detail="Invalid order status ID.")
+    Delete semantics (as per CRUD contract):
+      - Returns 400 if ID is invalid (ok is None).
+      - Returns 400 if the status is in use by one or more orders (ok is False).
+      - Returns 200 with {"deleted": True} on success.
 
-        if ok is False:
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot delete this order status because one or more orders are using it.",
-            )
+    Args:
+        item_id: Order status ObjectId.
 
-        return JSONResponse(status_code=200, content={"deleted": True})
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete order status: {e}")
+    Returns:
+        JSONResponse({"deleted": True})
+    """
+    return await delete_item_service(item_id)

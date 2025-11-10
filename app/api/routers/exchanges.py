@@ -1,45 +1,30 @@
-# app/api/routes/exchanges.py
+"""
+Routes for managing Exchanges.
+- Handles request parsing, RBAC, and delegates business logic to services.
+- Includes user endpoints and admin endpoints.
+"""
+
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
+from datetime import date
 
-from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 
 from app.api.deps import require_permission, get_current_user
-from app.core.database import db
 from app.schemas.object_id import PyObjectId
-from app.schemas.exchanges import ExchangesCreate, ExchangesUpdate, ExchangesOut
-from app.crud import exchanges as crud
-from app.utils.gridfs import upload_image, replace_image, delete_image, _extract_file_id_from_url
+from app.schemas.exchanges import ExchangesUpdate, ExchangesOut
+from app.services.exchanges import (
+    create_exchange_service,
+    list_my_exchanges_service,
+    get_my_exchange_service,
+    admin_list_exchanges_service,
+    admin_get_exchange_service,
+    admin_update_exchange_status_service,
+    admin_delete_exchange_service,
+)
 
 router = APIRouter()
-
-from typing import Any  # make sure Any is imported
-
-def _to_oid(v: Any, field: str) -> ObjectId:
-    try:
-        return ObjectId(str(v))
-    except Exception:
-        raise HTTPException(status_code=400, detail=f"Invalid {field}")
-
-async def _get_order_item(order_item_id: PyObjectId) -> dict:
-    oi = await db["order_items"].find_one({"_id": _to_oid(order_item_id, "order_item_id")})
-    if not oi:
-        raise HTTPException(status_code=404, detail="Order item not found")
-    return oi
-
-async def _assert_order_belongs_to_user(order_id: ObjectId, user_id: ObjectId) -> dict:
-    doc = await db["orders"].find_one({"_id": order_id, "user_id": user_id})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Order not found for user")
-    return doc
-
-async def _get_exchange_status_id_by_label(label: str) -> ObjectId:
-    doc = await db["exchange_status"].find_one({"status": label})
-    if not doc:
-        raise HTTPException(status_code=500, detail=f"Exchange status '{label}' not found")
-    return doc["_id"]
 
 
 @router.post(
@@ -57,46 +42,34 @@ async def create_exchange(
     current_user: Dict = Depends(get_current_user),
 ):
     """
-    User creates an exchange by referencing a single order_item.
-    - Derives order_id and product_id from order_items.
-    - Enforces ownership.
-    - Forces exchange_status to 'requested' (looked up from exchange_status collection).
+    Create an exchange for a single order item.
+
+    Notes:
+    - Derives `order_id` and `product_id` from `order_items`.
+    - Verifies the order belongs to the current user.
+    - Forces `exchange_status` to "requested".
+    - Enforces delivery window: delivery_date must be within the last 7 days (inclusive).
+
+    Args:
+        order_item_id: The order item to exchange.
+        reason: Optional reason provided by the user.
+        image: Optional image to upload to GridFS.
+        new_quantity: Desired quantity for the exchange.
+        new_size: Desired size for the exchange (if applicable).
+        delivery_date: The date the order was delivered (YYYY-MM-DD).
+        current_user: Injected current user.
+
+    Returns:
+        ExchangesOut: The created exchange.
     """
-    user_oid = _to_oid(current_user["user_id"], "user_id")
-
-    # 1) load order_item and derive order_id + product_id
-    oi = await _get_order_item(order_item_id)
-    order_id = oi["order_id"]
-    product_id = oi["product_id"]
-
-    # 2) ensure the order belongs to this user
-    await _assert_order_belongs_to_user(order_id, user_oid)
-
-    # 3) resolve exchange_status = "requested"
-    requested_status_id = await _get_exchange_status_id_by_label("requested")
-
-    # 4) handle image (GridFS or direct URL)
-    if image is not None:
-        _, final_url = await upload_image(image)
-
-    # 5) build payload using derived ids + forced status
-    payload = ExchangesCreate(
-        order_id=PyObjectId(str(order_id)),
-        product_id=PyObjectId(str(product_id)),
-        exchange_status_id=PyObjectId(str(requested_status_id)),
-        user_id=PyObjectId(str(user_oid)),
+    return await create_exchange_service(
+        order_item_id=order_item_id,
         reason=reason,
-        image_url=final_url,
+        image=image,
         new_quantity=new_quantity,
         new_size=new_size,
+        current_user=current_user,
     )
-
-    try:
-        return await crud.create(payload)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create exchange: {e}")
 
 
 @router.get(
@@ -109,14 +82,18 @@ async def list_my_exchanges(
     limit: int = Query(50, ge=1, le=200),
     current_user: Dict = Depends(get_current_user),
 ):
-    try:
-        return await crud.list_all(
-            skip=skip,
-            limit=limit,
-            query={"user_id": current_user["user_id"]},
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list exchanges: {e}")
+    """
+    List exchanges created by the current user.
+
+    Args:
+        skip: Pagination offset.
+        limit: Page size.
+        current_user: Injected current user.
+
+    Returns:
+        List[ExchangesOut]
+    """
+    return await list_my_exchanges_service(skip=skip, limit=limit, current_user=current_user)
 
 
 @router.get(
@@ -125,17 +102,20 @@ async def list_my_exchanges(
     dependencies=[Depends(require_permission("exchanges", "Read"))],
 )
 async def get_my_exchange(item_id: PyObjectId, current_user: Dict = Depends(get_current_user)):
-    try:
-        item = await crud.get_one(item_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="Exchange not found")
-        if str(item.user_id) != str(current_user["user_id"]):
-            raise HTTPException(status_code=403, detail="Forbidden")
-        return item
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get exchange: {e}")
+    """
+    Get a single exchange created by the current user.
+
+    Args:
+        item_id: Exchange ObjectId.
+        current_user: Injected current user.
+
+    Returns:
+        ExchangesOut
+
+    Raises:
+        403 if the exchange does not belong to the current user.
+    """
+    return await get_my_exchange_service(item_id=item_id, current_user=current_user)
 
 
 # -------------------- Admin endpoints --------------------
@@ -153,15 +133,28 @@ async def admin_list_exchanges(
     product_id: Optional[PyObjectId] = Query(None),
     exchange_status_id: Optional[PyObjectId] = Query(None),
 ):
-    try:
-        q: Dict[str, Any] = {}
-        if user_id: q["user_id"] = user_id
-        if order_id: q["order_id"] = order_id
-        if product_id: q["product_id"] = product_id
-        if exchange_status_id: q["exchange_status_id"] = exchange_status_id
-        return await crud.list_all(skip=skip, limit=limit, query=q or None)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list exchanges: {e}")
+    """
+    Admin: List exchanges with optional filters.
+
+    Args:
+        skip: Pagination offset.
+        limit: Page size.
+        user_id: Filter by user.
+        order_id: Filter by order.
+        product_id: Filter by product.
+        exchange_status_id: Filter by status id.
+
+    Returns:
+        List[ExchangesOut]
+    """
+    return await admin_list_exchanges_service(
+        skip=skip,
+        limit=limit,
+        user_id=user_id,
+        order_id=order_id,
+        product_id=product_id,
+        exchange_status_id=exchange_status_id,
+    )
 
 
 @router.get(
@@ -170,15 +163,16 @@ async def admin_list_exchanges(
     dependencies=[Depends(require_permission("exchanges", "Read", "admin"))],
 )
 async def admin_get_exchange(item_id: PyObjectId):
-    try:
-        item = await crud.get_one(item_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="Exchange not found")
-        return item
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get exchange: {e}")
+    """
+    Admin: Get a single exchange by ID.
+
+    Args:
+        item_id: Exchange ObjectId.
+
+    Returns:
+        ExchangesOut
+    """
+    return await admin_get_exchange_service(item_id)
 
 
 @router.put(
@@ -188,19 +182,19 @@ async def admin_get_exchange(item_id: PyObjectId):
 )
 async def admin_update_exchange_status(item_id: PyObjectId, payload: ExchangesUpdate):
     """
-    Admin can only update exchange_status_id (as per schema).
+    Admin: Update exchange status only.
+
+    Args:
+        item_id: Exchange ObjectId.
+        payload: ExchangesUpdate (expects exchange_status_id).
+
+    Returns:
+        ExchangesOut
+
+    Raises:
+        400 if exchange_status_id missing.
     """
-    try:
-        if payload.exchange_status_id is None:
-            raise HTTPException(status_code=400, detail="exchange_status_id is required")
-        updated = await crud.update_one(item_id, payload)
-        if not updated:
-            raise HTTPException(status_code=404, detail="Exchange not found or not updated")
-        return updated
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update exchange: {e}")
+    return await admin_update_exchange_status_service(item_id=item_id, payload=payload)
 
 
 @router.delete(
@@ -209,22 +203,12 @@ async def admin_update_exchange_status(item_id: PyObjectId, payload: ExchangesUp
 )
 async def admin_delete_exchange(item_id: PyObjectId):
     """
-    Admin delete; if the exchange has a GridFS-backed image, remove it too.
+    Admin: Delete an exchange and remove its GridFS-backed image if present.
+
+    Args:
+        item_id: Exchange ObjectId.
+
+    Returns:
+        JSONResponse({"deleted": True})
     """
-    try:
-        current = await crud.get_one(item_id)
-        if not current:
-            raise HTTPException(status_code=404, detail="Exchange not found")
-
-        file_id = _extract_file_id_from_url(current.image_url)
-        if file_id:
-            await delete_image(file_id)
-
-        ok = await crud.delete_one(item_id)
-        if not ok:
-            raise HTTPException(status_code=404, detail="Exchange not found")
-        return JSONResponse(status_code=200, content={"deleted": True})
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete exchange: {e}")
+    return await admin_delete_exchange_service(item_id)

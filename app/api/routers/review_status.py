@@ -1,3 +1,8 @@
+"""
+Routes for Review Status master CRUD.
+Delegates business logic to the service layer.
+"""
+
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
 
@@ -11,17 +16,15 @@ from app.schemas.review_status import (
     ReviewStatusUpdate,
     ReviewStatusOut,
 )
-from app.crud import review_status as crud
+from app.services.review_status import (
+    create_review_status,
+    list_review_statuses,
+    get_review_status,
+    update_review_status,
+    delete_review_status,
+)
 
 router = APIRouter()  # mount at /review-status
-
-
-def _raise_conflict_if_dup(err: Exception, field_hint: Optional[str] = None):
-    msg = str(err)
-    if "E11000" in msg:
-        detail = "Duplicate key." if not field_hint else f"Duplicate {field_hint}."
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
-    raise err
 
 
 @router.post(
@@ -38,15 +41,8 @@ def _raise_conflict_if_dup(err: Exception, field_hint: Optional[str] = None):
     },
 )
 async def create_item(payload: ReviewStatusCreate):
-    try:
-        return await crud.create(payload)
-    except HTTPException:
-        raise
-    except Exception as e:
-        try:
-            _raise_conflict_if_dup(e, field_hint="idx or status")
-        except Exception as e2:
-            raise HTTPException(status_code=500, detail=f"Failed to create review status: {e2}")
+    """Create a new review status."""
+    return await create_review_status(payload)
 
 
 @router.get(
@@ -65,13 +61,8 @@ async def list_items(
     limit: int = Query(50, ge=1, le=200),
     status_q: Optional[str] = Query(None, description="Filter by status (exact match)"),
 ):
-    try:
-        q: Dict[str, Any] = {}
-        if status_q:
-            q["status"] = status_q
-        return await crud.list_all(skip=skip, limit=limit, query=q or None)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list review statuses: {e}")
+    """List review statuses with optional exact-status filter."""
+    return await list_review_statuses(skip, limit, status_q)
 
 
 @router.get(
@@ -86,15 +77,8 @@ async def list_items(
     },
 )
 async def get_item(item_id: PyObjectId):
-    try:
-        item = await crud.get_one(item_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="Review status not found")
-        return item
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get review status: {e}")
+    """Get a single review status by id."""
+    return await get_review_status(item_id)
 
 
 @router.put(
@@ -111,20 +95,8 @@ async def get_item(item_id: PyObjectId):
     },
 )
 async def update_item(item_id: PyObjectId, payload: ReviewStatusUpdate):
-    try:
-        if not any(v is not None for v in payload.model_dump().values()):
-            raise HTTPException(status_code=400, detail="No fields provided for update")
-        updated = await crud.update_one(item_id, payload)
-        if not updated:
-            raise HTTPException(status_code=404, detail="Review status not found or not updated")
-        return updated
-    except HTTPException:
-        raise
-    except Exception as e:
-        try:
-            _raise_conflict_if_dup(e, field_hint="idx or status")
-        except Exception as e2:
-            raise HTTPException(status_code=500, detail=f"Failed to update review status: {e2}")
+    """Update fields of a review status."""
+    return await update_review_status(item_id, payload)
 
 
 @router.delete(
@@ -139,20 +111,6 @@ async def update_item(item_id: PyObjectId, payload: ReviewStatusUpdate):
     },
 )
 async def delete_item(item_id: PyObjectId):
-    try:
-        ok = await crud.delete_one(item_id)
-
-        if ok is None:
-            raise HTTPException(status_code=400, detail="Invalid review status ID.")
-
-        if ok is False:
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot delete this review status because one or more reviews are using it.",
-            )
-
-        return JSONResponse(status_code=200, content={"deleted": True})
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete review status: {e}")
+    """Delete a review status (blocked if referenced by reviews)."""
+    await delete_review_status(item_id)
+    return JSONResponse(status_code=200, content={"deleted": True})

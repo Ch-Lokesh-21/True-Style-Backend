@@ -1,18 +1,24 @@
+"""
+Routes for Product Images.
+- Thin HTTP layer that parses inputs, applies RBAC, and delegates to service functions.
+"""
+
 from __future__ import annotations
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, Query, status, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 
 from app.api.deps import require_permission
 from app.schemas.object_id import PyObjectId
-from app.schemas.product_images import (
-    ProductImagesCreate,
-    ProductImagesUpdate,
-    ProductImagesOut,
+from app.schemas.product_images import ProductImagesOut, ProductImagesUpdate
+from app.services.product_images import (
+    create_item_service,
+    list_items_service,
+    get_item_service,
+    update_item_service,
+    delete_item_service,
 )
-from app.crud import product_images as crud
-from app.utils.gridfs import upload_image, replace_image, delete_image, _extract_file_id_from_url
 
 router = APIRouter()
 
@@ -28,24 +34,19 @@ async def create_item(
     image: UploadFile = File(...),
 ):
     """
-    Create a ProductImages doc:
-      - file is uploaded to GridFS
-      - `product_id` is a real ObjectId via PyObjectId
-    """
-    try:
-        if image is None or image.filename is None:
-            raise HTTPException(status_code=400, detail="Image file is required")
+    Create a ProductImages document.
 
-        _, url = await upload_image(image)
-        payload = ProductImagesCreate(product_id=product_id, image_url=url)
-        created = await crud.create(payload)
-        if not created:
-            raise HTTPException(status_code=500, detail="Failed to persist ProductImages")
-        return created
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create ProductImages: {e}")
+    - Streams the file into GridFS and stores `image_url`.
+    - `product_id` is validated as an ObjectId by PyObjectId.
+
+    Args:
+        product_id: Target product's ObjectId.
+        image: Image file to upload (required).
+
+    Returns:
+        ProductImagesOut
+    """
+    return await create_item_service(product_id=product_id, image=image)
 
 
 @router.get("/", response_model=List[ProductImagesOut])
@@ -54,23 +55,35 @@ async def list_items(
     limit: int = Query(50, ge=1, le=200),
     product_id: Optional[PyObjectId] = Query(None, description="Filter by product ObjectId"),
 ):
-    try:
-        return await crud.list_all(skip=skip, limit=limit, product_id=product_id)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list ProductImages: {e}")
+    """
+    List product images with optional filter by product.
+
+    Args:
+        skip: Pagination offset.
+        limit: Page size.
+        product_id: Optional product filter.
+
+    Returns:
+        List[ProductImagesOut]
+    """
+    return await list_items_service(skip=skip, limit=limit, product_id=product_id)
 
 
 @router.get("/{item_id}", response_model=ProductImagesOut)
 async def get_item(item_id: PyObjectId):
-    try:
-        d = await crud.get_one(item_id)
-        if not d:
-            raise HTTPException(status_code=404, detail="ProductImages not found")
-        return d
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get ProductImages: {e}")
+    """
+    Get a single ProductImages doc by id.
+
+    Args:
+        item_id: ProductImages ObjectId.
+
+    Returns:
+        ProductImagesOut
+
+    Raises:
+        404 if not found.
+    """
+    return await get_item_service(item_id)
 
 
 @router.put(
@@ -81,41 +94,26 @@ async def get_item(item_id: PyObjectId):
 async def update_item(
     item_id: PyObjectId,
     product_id: Optional[PyObjectId] = Form(None),
-    image: UploadFile = File(None),
+    image: UploadFile = File(None),  # show upload control in docs; optional here
 ):
     """
-    Update `product_id` (real ObjectId) and/or replace image in GridFS.
+    Update `product_id` and/or replace the image in GridFS.
+
+    Args:
+        item_id: ProductImages ObjectId.
+        product_id: Optional new product id.
+        image: Optional new image file.
+
+    Returns:
+        ProductImagesOut
+
+    Raises:
+        400 if no fields provided.
+        404 if not found.
+        409 on generic update conflict.
     """
-    try:
-        current = await crud.get_one(item_id)
-        if not current:
-            raise HTTPException(status_code=404, detail="ProductImages not found")
-
-        patch = ProductImagesUpdate()
-
-        if product_id is not None:
-            patch.product_id = product_id
-
-        if image is not None:
-            old_id = _extract_file_id_from_url(current.image_url)
-            if old_id:
-                _, new_url = await replace_image(old_id, image)
-            else:
-                _, new_url = await upload_image(image)
-            patch.image_url = new_url
-
-        if not any(v is not None for v in patch.model_dump().values()):
-            raise HTTPException(status_code=400, detail="No fields provided for update")
-
-        updated = await crud.update_one(item_id, patch)
-        if not updated:
-            # (e.g., concurrent delete)
-            raise HTTPException(status_code=409, detail="Update failed")
-        return updated
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update ProductImages: {e}")
+    patch = ProductImagesUpdate(product_id=product_id)
+    return await update_item_service(item_id=item_id, patch=patch, image=image)
 
 
 @router.delete(
@@ -124,23 +122,15 @@ async def update_item(
 )
 async def delete_item(item_id: PyObjectId):
     """
-    Delete the document and best-effort remove the GridFS file afterwards.
+    Delete the ProductImages document and best-effort remove its GridFS file.
+
+    Args:
+        item_id: ProductImages ObjectId.
+
+    Returns:
+        JSONResponse({"deleted": True})
+
+    Raises:
+        404 if not found.
     """
-    try:
-        current = await crud.get_one(item_id)
-        if not current:
-            raise HTTPException(status_code=404, detail="ProductImages not found")
-
-        ok = await crud.delete_one(item_id)
-        if not ok:
-            raise HTTPException(status_code=400, detail="Unable to delete ProductImages")
-
-        file_id = _extract_file_id_from_url(current.image_url)
-        if file_id:
-            await delete_image(file_id)
-
-        return JSONResponse(status_code=200, content={"deleted": True})
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete ProductImages: {e}")
+    return await delete_item_service(item_id)

@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-
+"""Helpers for keep track of createdAt and updatedAt for all collections"""
 def stamp_create(doc: dict) -> dict:
     now = datetime.now(timezone.utc)
     doc["createdAt"] = now

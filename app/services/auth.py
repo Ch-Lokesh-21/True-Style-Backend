@@ -36,12 +36,34 @@ from app.schemas.requests import (
 )
 from app.utils.fastapi_mail import _send_mail, generate_otp_email_html
 
-# ------------------- helpers -------------------
+
+# -------------------------------------------------
+# Helpers
+# -------------------------------------------------
+
 
 def _unix_to_dt(ts: int) -> datetime:
+    """
+    Convert a UNIX timestamp (int) into a timezone-aware UTC datetime.
+
+    Args:
+        ts (int): UNIX timestamp.
+
+    Returns:
+        datetime: Converted datetime in UTC.
+    """
     return datetime.fromtimestamp(ts, tz=timezone.utc)
 
+
 def _set_refresh_cookie(response: Response, token: str, exp_ts: int) -> None:
+    """
+    Attach refresh token to HTTP-only secure cookie.
+
+    Args:
+        response (Response): FastAPI response object.
+        token (str): Refresh token string.
+        exp_ts (int): Expiration timestamp for cookie.
+    """
     max_age = settings.REFRESH_COOKIE_MAX_AGE_DAYS * 86400
     response.set_cookie(
         key=settings.REFRESH_COOKIE_NAME,
@@ -54,31 +76,61 @@ def _set_refresh_cookie(response: Response, token: str, exp_ts: int) -> None:
         expires=exp_ts,
     )
 
+
 def _clear_refresh_cookie(response: Response) -> None:
+    """
+    Deletes refresh-token cookie from client.
+
+    Args:
+        response (Response): FastAPI response used to delete cookie.
+    """
     response.delete_cookie(
         key=settings.REFRESH_COOKIE_NAME,
         path=settings.REFRESH_COOKIE_PATH,
     )
 
-# ------------------- services -------------------
+
+# -------------------------------------------------
+# Auth Services
+# -------------------------------------------------
 
 async def login_service(response: Response, request: Request, body: LoginIn) -> LoginResponse:
+    """
+    Authenticate a user using email & password.
+
+    - Validates credentials
+    - Checks blocked status
+    - Creates a session
+    - Issues access & refresh tokens
+    - Stores refresh token as HTTP-only cookie
+
+    Returns:
+        LoginResponse: JWT access token and payload.
+
+    Raises:
+        HTTPException 401: Invalid credentials.
+        HTTPException 403: User is suspended.
+        HTTPException 500: Unexpected server error.
+    """
     try:
         email = body.email
         user = await db["users"].find_one({"email": email})
         if not user or not verify_password(body.password, user.get("password", "")):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
-        user_status = await db["user_status"].find_one({"status":"blocked"})
-        if str(user["user_status_id"])==str(user_status["_id"]):
+
+        user_status = await db["user_status"].find_one({"status": "blocked"})
+        if str(user["user_status_id"]) == str(user_status["_id"]):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "User account is suspended")
-        # update last login (UTC)
+
+        # Update last login timestamp
         await db["users"].update_one(
             {"_id": user["_id"]},
             {"$set": {"last_login": datetime.now(timezone.utc)}},
         )
-        wishlist = await db["wishlists"].find_one({"user_id":ObjectId(user["_id"])})
-        
-        cart = await db["carts"].find_one({"user_id":ObjectId(user["_id"])})
+
+        wishlist = await db["wishlists"].find_one({"user_id": ObjectId(user["_id"])})
+        cart = await db["carts"].find_one({"user_id": ObjectId(user["_id"])})
+
         payload = {
             "user_id": str(user["_id"]),
             "user_role_id": str(user["role_id"]),
@@ -93,9 +145,11 @@ async def login_service(response: Response, request: Request, body: LoginIn) -> 
                 "user_id": payload["user_id"],
                 "user_role_id": payload["user_role_id"],
                 "wishlist_id": payload["wishlist_id"],
-                "cart_id": payload["cart_id"]
+                "cart_id": payload["cart_id"],
             }
         )
+
+        # Create session record
         sess = {
             "user_id": payload["user_id"],
             "jti": rt["jti"],
@@ -116,40 +170,46 @@ async def login_service(response: Response, request: Request, body: LoginIn) -> 
                 "user_id": payload["user_id"],
                 "user_role_id": payload["user_role_id"],
                 "wishlist_id": payload["wishlist_id"],
-                "cart_id": payload["cart_id"]
+                "cart_id": payload["cart_id"],
             },
         )
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal Server Error") from e
+    except Exception:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal Server Error")
 
 
 async def register_service(payload: RegisterIn) -> UserOut:
+    """
+    Register a new user.
+    - Ensures email and phone are unique
+    - Assigns default role + active status
+    - Hashes password
+    - Persists to DB
+
+    Returns:
+        UserOut: Newly created user record
+    """
     email = payload.email
     try:
-        # uniqueness checks
-        existing = await db["users"].find_one({"email": email})
-        if existing:
+        if await db["users"].find_one({"email": email}):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Email already registered")
 
-        existing = await db["users"].find_one(
+        if await db["users"].find_one(
             {"phone_no": payload.phone_no, "country_code": payload.country_code}
-        )
-        if existing:
+        ):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Phone number already registered")
 
-        # default role & status
+        # Defaults
         role = await db["user_roles"].find_one({"role": "user"})
         if not role:
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Default user role not found")
-        role_id = str(role["_id"])
 
         status_doc = await db["user_status"].find_one({"status": "active"})
         if not status_doc:
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Default user status not found")
-        user_status_id = status_doc["_id"]
 
+        # Build DB record using Pydantic UserCreate
         doc = UserCreate(
             first_name=payload.first_name,
             last_name=payload.last_name,
@@ -157,22 +217,28 @@ async def register_service(payload: RegisterIn) -> UserOut:
             password=payload.password,
             country_code=payload.country_code,
             phone_no=payload.phone_no,
-            role_id=role_id,
-            user_status_id=user_status_id,
+            role_id=str(role["_id"]),
+            user_status_id=status_doc["_id"],
             last_login=None,
         )
         return await crud.create(doc)
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error during registration") from e
+    except Exception:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error during registration")
 
 
-async def refresh_token_service(
-    response: Response,
-    request: Request,
-    rt: Optional[str] = Cookie(default=None, alias=settings.REFRESH_COOKIE_NAME),
-) -> TokenRotatedOut:
+async def refresh_token_service(response: Response, request: Request, rt: Optional[str]) -> TokenRotatedOut:
+    """
+    Rotate refresh token:
+    - Validate old refresh token & session
+    - Revoke old token
+    - Issue new access + refresh
+    - Set new HTTP-only cookie
+
+    Returns:
+        TokenRotatedOut: new access token details
+    """
     try:
         if not rt:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "No refresh cookie")
@@ -188,16 +254,21 @@ async def refresh_token_service(
         if not session:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session not found or revoked")
 
-        # rotate the old refresh
+        # Revoke previous refresh
         await revoke_session_by_jti(session["jti"], reason="refresh-used")
-        await add_revocation(session["jti"], expiresAt=_unix_to_dt(payload["exp"]), reason="refresh-used")
+        await add_revocation(
+            session["jti"],
+            expiresAt=_unix_to_dt(payload["exp"]),
+            reason="refresh-used",
+        )
 
         new_payload = {
             "user_id": payload["user_id"],
             "user_role_id": payload["user_role_id"],
             "wishlist_id": payload["wishlist_id"],
-            "cart_id": payload["cart_id"]
+            "cart_id": payload["cart_id"],
         }
+
         at = create_access_token(new_payload)
         new_rt = create_refresh_token(new_payload)
 
@@ -214,21 +285,34 @@ async def refresh_token_service(
 
         _set_refresh_cookie(response, new_rt["token"], new_rt["exp"])
 
-        return TokenRotatedOut(access_token=at["token"], access_jti=at["jti"], access_exp=at["exp"])
+        return TokenRotatedOut(
+            access_token=at["token"],
+            access_jti=at["jti"],
+            access_exp=at["exp"],
+        )
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal Server Error") from e
+    except Exception:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal Server Error")
 
 
 async def logout_service(
     response: Response,
     request: Request,
-    rt: Optional[str] = None,
-    access_token: Optional[str] = None,
+    rt: Optional[str],
+    access_token: Optional[str],
 ) -> MessageOut:
+    """
+    Logout user:
+    - Revoke access token
+    - Revoke refresh token session
+    - Clear refresh cookie
+
+    Returns:
+        MessageOut: success message
+    """
     try:
-        # 🔹 Revoke access token 
+        # Revoke access token
         if access_token:
             ap = decode_access_token(access_token)
             if ap and ap.get("type") == "access":
@@ -238,7 +322,7 @@ async def logout_service(
                     reason="logout-access",
                 )
 
-        # 🔹 Revoke refresh token (if cookie exists)
+        # Revoke refresh token
         if rt:
             payload = decode_refresh_token(rt)
             if payload and payload.get("type") == "refresh":
@@ -251,20 +335,23 @@ async def logout_service(
                         reason="logout-refresh",
                     )
 
-        # 🔹 Clear the refresh cookie
         _clear_refresh_cookie(response)
-
         return MessageOut(message="Logged out successfully")
-
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(
-            status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal Server Error"
-        ) from e
+    except Exception:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal Server Error")
 
 
 async def change_password_service(current=Depends(get_current_user), body: ChangePasswordIn = ...) -> MessageOut:
+    """
+    Change user password:
+    - Verify old password
+    - Hash & store new password
+
+    Returns:
+        MessageOut: success confirmation
+    """
     try:
         user = await db["users"].find_one({"_id": ObjectId(current["user_id"])})
         if not user or not verify_password(body.old_password, user.get("password", "")):
@@ -277,11 +364,17 @@ async def change_password_service(current=Depends(get_current_user), body: Chang
         return MessageOut(message="Password updated")
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal Server Error") from e
+    except Exception:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal Server Error")
 
 
 async def forgot_password_request_service(body: ForgotPasswordRequestIn) -> MessageOut:
+    """
+    Generate OTP and send email to user for password reset.
+
+    Returns:
+        MessageOut: OTP sent confirmation
+    """
     try:
         email = body.email
         user = await db["users"].find_one({"email": email})
@@ -294,11 +387,17 @@ async def forgot_password_request_service(body: ForgotPasswordRequestIn) -> Mess
         return MessageOut(message="OTP sent")
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal Server Error") from e
+    except Exception:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal Server Error")
 
 
 async def forgot_password_verify_service(body: ForgotPasswordVerifyIn) -> MessageOut:
+    """
+    Verify OTP and reset user password.
+
+    Returns:
+        MessageOut: password reset success message
+    """
     try:
         email = body.email
         user = await db["users"].find_one({"email": email, "otp": body.otp})
@@ -312,5 +411,5 @@ async def forgot_password_verify_service(body: ForgotPasswordVerifyIn) -> Messag
         return MessageOut(message="Password reset successful")
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal Server Error") from e
+    except Exception:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal Server Error")

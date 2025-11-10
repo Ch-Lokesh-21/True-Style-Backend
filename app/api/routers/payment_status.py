@@ -1,7 +1,12 @@
+"""
+Routes for Payment Status.
+- Thin HTTP layer: parses requests, applies RBAC, delegates to service.
+"""
+
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import JSONResponse
 
 from app.api.deps import require_permission
@@ -11,17 +16,15 @@ from app.schemas.payment_status import (
     PaymentStatusUpdate,
     PaymentStatusOut,
 )
-from app.crud import payment_status as crud
+from app.services.payment_status import (
+    create_item_service,
+    list_items_service,
+    get_item_service,
+    update_item_service,
+    delete_item_service,
+)
 
 router = APIRouter()  # mounted in main.py at /payment-status
-
-
-def _raise_conflict_if_dup(err: Exception, field_hint: Optional[str] = None):
-    msg = str(err)
-    if "E11000" in msg:
-        detail = "Duplicate key." if not field_hint else f"Duplicate {field_hint}."
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
-    raise err
 
 
 @router.post(
@@ -31,15 +34,19 @@ def _raise_conflict_if_dup(err: Exception, field_hint: Optional[str] = None):
     dependencies=[Depends(require_permission("payment_status", "Create"))]
 )
 async def create_item(payload: PaymentStatusCreate):
-    try:
-        return await crud.create(payload)
-    except HTTPException:
-        raise
-    except Exception as e:
-        try:
-            _raise_conflict_if_dup(e, field_hint="idx or status")
-        except Exception as e2:
-            raise HTTPException(status_code=500, detail=f"Failed to create payment status: {e2}")
+    """
+    Create a payment status.
+
+    Args:
+        payload: PaymentStatusCreate.
+
+    Returns:
+        PaymentStatusOut
+
+    Raises:
+        409 on duplicate key (idx or status), if unique index exists.
+    """
+    return await create_item_service(payload)
 
 
 @router.get(
@@ -52,13 +59,21 @@ async def list_items(
     limit: int = Query(50, ge=1, le=200),
     status_q: Optional[str] = Query(None, description="Filter by exact status"),
 ):
-    try:
-        q: Dict[str, Any] = {}
-        if status_q:
-            q["status"] = status_q
-        return await crud.list_all(skip=skip, limit=limit, query=q or None)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list payment status: {e}")
+    """
+    List payment statuses with optional exact `status` filter.
+
+    Args:
+        skip: Offset.
+        limit: Limit.
+        status_q: Optional exact status match.
+
+    Returns:
+        List[PaymentStatusOut]
+    """
+    q: Dict[str, Any] = {}
+    if status_q:
+        q["status"] = status_q
+    return await list_items_service(skip=skip, limit=limit, query=q or None)
 
 
 @router.get(
@@ -67,15 +82,19 @@ async def list_items(
     dependencies=[Depends(require_permission("payment_status", "Read"))]
 )
 async def get_item(item_id: PyObjectId):
-    try:
-        item = await crud.get_one(item_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="Payment status not found")
-        return item
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get payment status: {e}")
+    """
+    Get a single payment status by id.
+
+    Args:
+        item_id: Payment status ObjectId.
+
+    Returns:
+        PaymentStatusOut
+
+    Raises:
+        404 if not found.
+    """
+    return await get_item_service(item_id)
 
 
 @router.put(
@@ -84,20 +103,22 @@ async def get_item(item_id: PyObjectId):
     dependencies=[Depends(require_permission("payment_status", "Update"))]
 )
 async def update_item(item_id: PyObjectId, payload: PaymentStatusUpdate):
-    try:
-        if not any(v is not None for v in payload.model_dump().values()):
-            raise HTTPException(status_code=400, detail="No fields provided for update")
-        updated = await crud.update_one(item_id, payload)
-        if not updated:
-            raise HTTPException(status_code=404, detail="Payment status not found or not updated")
-        return updated
-    except HTTPException:
-        raise
-    except Exception as e:
-        try:
-            _raise_conflict_if_dup(e, field_hint="idx or status")
-        except Exception as e2:
-            raise HTTPException(status_code=500, detail=f"Failed to update payment status: {e2}")
+    """
+    Update a payment status.
+
+    Args:
+        item_id: Payment status ObjectId.
+        payload: PaymentStatusUpdate (must contain at least one field).
+
+    Returns:
+        PaymentStatusOut
+
+    Raises:
+        400 if no fields provided.
+        404 if not found.
+        409 on duplicate (idx or status).
+    """
+    return await update_item_service(item_id=item_id, payload=payload)
 
 
 @router.delete(
@@ -105,24 +126,18 @@ async def update_item(item_id: PyObjectId, payload: PaymentStatusUpdate):
     dependencies=[Depends(require_permission("payment_status", "Delete"))]
 )
 async def delete_item(item_id: PyObjectId):
-    try:
-        ok = await crud.delete_one(item_id)
+    """
+    Delete a payment status.
 
-        if ok is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid payment status ID.",
-            )
+    Delete semantics (per CRUD contract):
+      - If `ok is None`: ID invalid → 400.
+      - If `ok is False`: status in use by payments → 400.
+      - If `ok is True`: return 200 with {"deleted": True}.
 
-        if ok is False:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot delete this payment status because one or more payments are using it.",
-            )
+    Args:
+        item_id: Payment status ObjectId.
 
-        return JSONResponse(status_code=200, content={"deleted": True})
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete payment status: {e}")
+    Returns:
+        JSONResponse({"deleted": True})
+    """
+    return await delete_item_service(item_id)

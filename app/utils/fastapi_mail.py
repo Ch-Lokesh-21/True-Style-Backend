@@ -1,7 +1,7 @@
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
 from app.core.config import settings
 from datetime import datetime
-
+"""Create Connection"""
 conf = ConnectionConfig(
     MAIL_USERNAME=str(settings.MAIL_USERNAME),
     MAIL_PASSWORD=settings.MAIL_PASSWORD,
@@ -15,6 +15,10 @@ conf = ConnectionConfig(
     VALIDATE_CERTS=settings.VALIDATE_CERTS,
 )
 
+"""Send mail funtion to send emails
+
+  Args: subject, recipients[], body
+"""
 async def _send_mail(subject: str, recipients: list[str], body: str):
     try:
         fm = FastMail(conf)

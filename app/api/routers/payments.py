@@ -1,12 +1,22 @@
-# app/api/routes/payments.py
+"""
+Routes for Payments.
+- Thin HTTP layer: parses/validates inputs, applies RBAC, and delegates to services.
+"""
+
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from app.api.deps import require_permission, get_current_user
 from app.schemas.object_id import PyObjectId
 from app.schemas.payments import PaymentsUpdate, PaymentsOut
-from app.crud import payments as crud
+from app.services.payments import (
+    list_my_payments_service,
+    get_my_payment_service,
+    list_payments_admin_service,
+    get_payment_admin_service,
+    update_payment_status_admin_service,
+)
 
 router = APIRouter()  # mounted at /payments
 
@@ -28,17 +38,20 @@ async def list_my_payments(
 ):
     """
     List payments that belong to the **current user**.
-    Optional filters: order_id, invoice_no.
+
+    Args:
+        skip: Pagination offset.
+        limit: Page size.
+        order_id: Optional filter for a specific order.
+        invoice_no: Optional exact invoice number.
+        current_user: Injected current user context.
+
+    Returns:
+        List[PaymentsOut]
     """
-    try:
-        q: Dict[str, Any] = {"user_id": current_user["user_id"]}
-        if order_id is not None:
-            q["order_id"] = order_id
-        if invoice_no:
-            q["invoice_no"] = invoice_no.strip()
-        return await crud.list_all(skip=skip, limit=limit, query=q)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list my payments: {e}")
+    return await list_my_payments_service(
+        skip=skip, limit=limit, order_id=order_id, invoice_no=invoice_no, current_user=current_user
+    )
 
 
 @router.get(
@@ -52,18 +65,19 @@ async def get_my_payment(
 ):
     """
     Get a single payment if it belongs to the current user.
+
+    Args:
+        payment_id: Payment ObjectId.
+        current_user: Injected current user context.
+
+    Returns:
+        PaymentsOut
+
+    Raises:
+        404 if not found.
+        403 if the payment is not owned by the user.
     """
-    try:
-        item = await crud.get_one(payment_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="Payment not found")
-        if str(item.user_id) != str(current_user["user_id"]):
-            raise HTTPException(status_code=403, detail="Forbidden")
-        return item
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get payment: {e}")
+    return await get_my_payment_service(payment_id=payment_id, current_user=current_user)
 
 
 # --------------------------
@@ -84,24 +98,29 @@ async def list_payments_admin(
     invoice_no: Optional[str] = Query(None),
 ):
     """
-    Admin: list payments with rich filters:
-    user_id, order_id, payment_types_id, payment_status_id, invoice_no.
+    Admin: list payments with rich filters.
+
+    Args:
+        skip: Pagination offset.
+        limit: Page size.
+        user_id: Optional filter.
+        order_id: Optional filter.
+        payment_types_id: Optional filter.
+        payment_status_id: Optional filter.
+        invoice_no: Optional exact invoice number.
+
+    Returns:
+        List[PaymentsOut]
     """
-    try:
-        q: Dict[str, Any] = {}
-        if user_id is not None:
-            q["user_id"] = user_id
-        if order_id is not None:
-            q["order_id"] = order_id
-        if payment_types_id is not None:
-            q["payment_types_id"] = payment_types_id
-        if payment_status_id is not None:
-            q["payment_status_id"] = payment_status_id
-        if invoice_no:
-            q["invoice_no"] = invoice_no.strip()
-        return await crud.list_all(skip=skip, limit=limit, query=q or None)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list payments: {e}")
+    return await list_payments_admin_service(
+        skip=skip,
+        limit=limit,
+        user_id=user_id,
+        order_id=order_id,
+        payment_types_id=payment_types_id,
+        payment_status_id=payment_status_id,
+        invoice_no=invoice_no,
+    )
 
 
 @router.get(
@@ -110,16 +129,19 @@ async def list_payments_admin(
     dependencies=[Depends(require_permission("payments", "Read", "admin"))],
 )
 async def get_payment_admin(payment_id: PyObjectId):
-    """Admin: get any payment by id."""
-    try:
-        item = await crud.get_one(payment_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="Payment not found")
-        return item
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get payment: {e}")
+    """
+    Admin: get any payment by id.
+
+    Args:
+        payment_id: Payment ObjectId.
+
+    Returns:
+        PaymentsOut
+
+    Raises:
+        404 if not found.
+    """
+    return await get_payment_admin_service(payment_id)
 
 
 # --------------------------
@@ -133,16 +155,18 @@ async def get_payment_admin(payment_id: PyObjectId):
 async def update_payment_status_admin(payment_id: PyObjectId, payload: PaymentsUpdate):
     """
     Admin: update a payment's status (e.g., pending → success/failed).
+
     Only `payment_status_id` is expected in the payload.
+
+    Args:
+        payment_id: Payment ObjectId.
+        payload: PaymentsUpdate with `payment_status_id`.
+
+    Returns:
+        PaymentsOut
+
+    Raises:
+        400 if `payment_status_id` missing.
+        404 if not found.
     """
-    try:
-        if payload.payment_status_id is None:
-            raise HTTPException(status_code=400, detail="payment_status_id is required")
-        updated = await crud.update_one(payment_id, payload)
-        if not updated:
-            raise HTTPException(status_code=404, detail="Payment not found or not updated")
-        return updated
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update payment: {e}")
+    return await update_payment_status_admin_service(payment_id=payment_id, payload=payload)

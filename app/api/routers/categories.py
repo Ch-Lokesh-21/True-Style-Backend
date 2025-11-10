@@ -1,3 +1,9 @@
+"""
+Routes for managing Categories.
+Handles request validation, permissions, and delegates business logic to the service layer.
+Mounted at /categories
+"""
+
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
 
@@ -7,24 +13,15 @@ from fastapi.responses import JSONResponse
 from app.api.deps import require_permission
 from app.schemas.object_id import PyObjectId
 from app.schemas.categories import CategoriesCreate, CategoriesUpdate, CategoriesOut
-from app.crud import categories as crud
-from app.utils.gridfs import delete_image, _extract_file_id_from_url
+from app.services.categories import (
+    create_item_service,
+    list_items_service,
+    get_item_service,
+    update_item_service,
+    delete_item_service,
+)
 
-router = APIRouter()  # mounted at /categories
-
-
-async def _cleanup_gridfs_urls(urls: list[str]) -> list[str]:
-    """Best-effort GridFS deletions; returns warnings."""
-    warnings: list[str] = []
-    for url in urls or []:
-        try:
-            fid = _extract_file_id_from_url(url)
-            if not fid:
-                continue
-            await delete_image(fid)
-        except Exception as ex:
-            warnings.append(f"{url}: {ex}")
-    return warnings
+router = APIRouter()
 
 
 @router.post(
@@ -41,17 +38,19 @@ async def _cleanup_gridfs_urls(urls: list[str]) -> list[str]:
     },
 )
 async def create_item(payload: CategoriesCreate):
-    try:
-        created = await crud.create(payload)
-        if not created:
-            raise HTTPException(status_code=500, detail="Failed to persist category")
-        return created
-    except HTTPException:
-        raise
-    except Exception as e:
-        if "E11000" in str(e):
-            raise HTTPException(status_code=409, detail="Duplicate category")
-        raise HTTPException(status_code=500, detail=f"Failed to create category: {e}")
+    """
+    Create a new category.
+
+    Args:
+        payload (CategoriesCreate): Schema containing category creation fields.
+
+    Returns:
+        CategoriesOut: The newly created category record.
+
+    Raises:
+        HTTPException: 409 if duplicate, 500 on server error.
+    """
+    return await create_item_service(payload)
 
 
 @router.get(
@@ -70,10 +69,19 @@ async def list_items(
     category: Optional[str] = Query(None, description="Exact match filter"),
     q: Optional[str] = Query(None, description="Case-insensitive fuzzy search"),
 ):
-    try:
-        return await crud.list_all(skip=skip, limit=limit, category=category, q=q)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list categories: {e}")
+    """
+    List categories with pagination and optional search filters.
+
+    Args:
+        skip (int): Pagination offset.
+        limit (int): Number of records to return.
+        category (str, optional): Exact match filter.
+        q (str, optional): Regex fuzzy search.
+
+    Returns:
+        List[CategoriesOut]: Paginated list of categories.
+    """
+    return await list_items_service(skip, limit, category, q)
 
 
 @router.get(
@@ -87,15 +95,19 @@ async def list_items(
     },
 )
 async def get_item(item_id: PyObjectId):
-    try:
-        item = await crud.get_one(item_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="Category not found")
-        return item
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get category: {e}")
+    """
+    Get a single category by ID.
+
+    Args:
+        item_id (PyObjectId): Category ID.
+
+    Returns:
+        CategoriesOut: Category record.
+
+    Raises:
+        HTTPException: 404 if not found.
+    """
+    return await get_item_service(item_id)
 
 
 @router.put(
@@ -112,19 +124,17 @@ async def get_item(item_id: PyObjectId):
     },
 )
 async def update_item(item_id: PyObjectId, payload: CategoriesUpdate):
-    try:
-        if not any(v is not None for v in payload.model_dump().values()):
-            raise HTTPException(status_code=400, detail="No fields provided for update")
-        updated = await crud.update_one(item_id, payload)
-        if not updated:
-            raise HTTPException(status_code=404, detail="Category not found")
-        return updated
-    except HTTPException:
-        raise
-    except Exception as e:
-        if "E11000" in str(e):
-            raise HTTPException(status_code=409, detail="Duplicate category")
-        raise HTTPException(status_code=500, detail=f"Failed to update category: {e}")
+    """
+    Update a category.
+
+    Args:
+        item_id (PyObjectId): ID of category to update.
+        payload (CategoriesUpdate): Partial update fields.
+
+    Returns:
+        CategoriesOut: Updated record.
+    """
+    return await update_item_service(item_id, payload)
 
 
 @router.delete(
@@ -139,25 +149,13 @@ async def update_item(item_id: PyObjectId, payload: CategoriesUpdate):
 )
 async def delete_item(item_id: PyObjectId):
     """
-    Transactionally delete a category and all its products + related documents.
-    After commit, best-effort delete all related GridFS files (product thumbnails + product_images).
-    """
-    try:
-        result = await crud.delete_one_cascade(item_id)
-        if not result or result["status"] == "not_found":
-            raise HTTPException(status_code=404, detail="Category not found")
-        if result["status"] != "deleted":
-            raise HTTPException(status_code=500, detail="Failed to delete category")
+    Delete a category and related products.
+    After deleting DB docs, performs a best-effort cleanup of stored images in GridFS.
 
-        warnings = await _cleanup_gridfs_urls(result.get("image_urls", []))
-        payload: Dict[str, Any] = {
-            "deleted": True,
-            "stats": result.get("stats", {}),
-        }
-        if warnings:
-            payload["file_cleanup_warnings"] = warnings
-        return JSONResponse(status_code=200, content=payload)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete category: {e}")
+    Args:
+        item_id (PyObjectId): Category ID.
+
+    Returns:
+        JSONResponse: deletion result with optional warnings.
+    """
+    return await delete_item_service(item_id)

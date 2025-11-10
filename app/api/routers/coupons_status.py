@@ -1,4 +1,9 @@
-# app/api/routes/coupons_status.py
+"""
+Routes for managing Coupons Status.
+Handles HTTP request parsing, RBAC, validation, and delegates business logic to services.
+Mounted at /coupons-status
+"""
+
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
 
@@ -12,19 +17,15 @@ from app.schemas.coupons_status import (
     CouponsStatusUpdate,
     CouponsStatusOut,
 )
-from app.crud import coupons_status as crud
+from app.services.coupons_status import (
+    create_item_service,
+    list_items_service,
+    get_item_service,
+    update_item_service,
+    delete_item_service,
+)
 
 router = APIRouter()  # mounted at /coupons-status
-
-
-def _raise_conflict_if_dup(err: Exception, field_hint: Optional[str] = None):
-    msg = str(err)
-    if "E11000" in msg:
-        detail = "Duplicate key."
-        if field_hint:
-            detail = f"Duplicate {field_hint}."
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
-    raise err
 
 
 @router.post(
@@ -34,15 +35,21 @@ def _raise_conflict_if_dup(err: Exception, field_hint: Optional[str] = None):
     dependencies=[Depends(require_permission("coupons_status", "Create"))]
 )
 async def create_item(payload: CouponsStatusCreate):
-    try:
-        return await crud.create(payload)
-    except HTTPException:
-        raise
-    except Exception as e:
-        try:
-            _raise_conflict_if_dup(e, field_hint="status")
-        except Exception as e2:
-            raise HTTPException(status_code=500, detail=f"Failed to create coupons status: {e2}")
+    """
+    Create a coupons status record.
+
+    Args:
+        payload: Fields for the coupons status (e.g., idx, status).
+
+    Returns:
+        CouponsStatusOut: The newly created record.
+
+    Raises:
+        HTTPException:
+            - 409 if a duplicate key (e.g., status) exists.
+            - 500 on server error.
+    """
+    return await create_item_service(payload)
 
 
 @router.get(
@@ -55,13 +62,21 @@ async def list_items(
     limit: int = Query(50, ge=1, le=200),
     status_q: Optional[str] = Query(None, description="Filter by exact status"),
 ):
-    try:
-        q: Dict[str, Any] = {}
-        if status_q:
-            q["status"] = status_q
-        return await crud.list_all(skip=skip, limit=limit, query=q or None)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list coupons status: {e}")
+    """
+    List coupons status records with optional exact status filter.
+
+    Args:
+        skip: Pagination offset.
+        limit: Page size.
+        status_q: Exact status string to filter by.
+
+    Returns:
+        List[CouponsStatusOut]: Paginated list of status records.
+
+    Raises:
+        HTTPException: 500 on server error.
+    """
+    return await list_items_service(skip=skip, limit=limit, status_q=status_q)
 
 
 @router.get(
@@ -70,15 +85,21 @@ async def list_items(
     dependencies=[Depends(require_permission("coupons_status", "Read"))]
 )
 async def get_item(item_id: PyObjectId):
-    try:
-        item = await crud.get_one(item_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="Coupons status not found")
-        return item
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get coupons status: {e}")
+    """
+    Get a single coupons status record by its ID.
+
+    Args:
+        item_id: Coupons status ObjectId.
+
+    Returns:
+        CouponsStatusOut: The matching record.
+
+    Raises:
+        HTTPException:
+            - 404 if not found.
+            - 500 on server error.
+    """
+    return await get_item_service(item_id)
 
 
 @router.put(
@@ -87,20 +108,24 @@ async def get_item(item_id: PyObjectId):
     dependencies=[Depends(require_permission("coupons_status", "Update"))],
 )
 async def update_item(item_id: PyObjectId, payload: CouponsStatusUpdate):
-    try:
-        if not any(v is not None for v in payload.model_dump().values()):
-            raise HTTPException(status_code=400, detail="No fields provided for update")
-        updated = await crud.update_one(item_id, payload)
-        if not updated:
-            raise HTTPException(status_code=404, detail="Coupons status not found or not updated")
-        return updated
-    except HTTPException:
-        raise
-    except Exception as e:
-        try:
-            _raise_conflict_if_dup(e, field_hint="idx or status")
-        except Exception as e2:
-            raise HTTPException(status_code=500, detail=f"Failed to update coupons status: {e2}")
+    """
+    Update fields of a coupons status record.
+
+    Args:
+        item_id: Record ID.
+        payload: Partial update fields.
+
+    Returns:
+        CouponsStatusOut: Updated record.
+
+    Raises:
+        HTTPException:
+            - 400 if no fields provided.
+            - 404 if not found.
+            - 409 on duplicate (idx or status).
+            - 500 on server error.
+    """
+    return await update_item_service(item_id=item_id, payload=payload)
 
 
 @router.delete(
@@ -108,27 +133,23 @@ async def update_item(item_id: PyObjectId, payload: CouponsStatusUpdate):
     dependencies=[Depends(require_permission("coupons_status", "Delete"))],
 )
 async def delete_item(item_id: PyObjectId):
-    try:
-        ok = await crud.delete_one(item_id)
+    """
+    Delete a coupons status record.
 
-        if ok is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid coupon status ID.",
-            )
+    Deletion outcomes from CRUD:
+      - None: invalid ID → 400
+      - False: in-use by one or more coupons → 400
+      - True: deleted → 200
 
-        if ok is False:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot delete this status because one or more coupons are using it.",
-            )
+    Args:
+        item_id: Record ID.
 
-        return JSONResponse(status_code=200, content={"deleted": True})
+    Returns:
+        JSONResponse: {"deleted": True} on success.
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to delete coupons status: {e}",
-        )
+    Raises:
+        HTTPException:
+            - 400 for invalid ID or when status is in use.
+            - 500 on server error.
+    """
+    return await delete_item_service(item_id=item_id)

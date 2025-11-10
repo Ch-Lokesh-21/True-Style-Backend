@@ -1,18 +1,19 @@
 from __future__ import annotations
 from typing import List, Dict, Any
 
-from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 
 from app.api.deps import require_permission, get_current_user
 from app.schemas.object_id import PyObjectId
-from app.schemas.user_address import (
-    UserAddressCreate,
-    UserAddressUpdate,
-    UserAddressOut,
+from app.schemas.user_address import UserAddressCreate, UserAddressUpdate, UserAddressOut
+from app.services.user_address import (
+    create_user_address,
+    list_user_addresses,
+    get_user_address,
+    update_user_address,
+    delete_user_address,
 )
-from app.crud import user_address as crud
 
 router = APIRouter()  # main.py mounts with: app.include_router(router, prefix="/user-address")
 
@@ -27,22 +28,7 @@ async def create_item(
     payload: UserAddressCreate,
     current_user: Dict = Depends(get_current_user),
 ):
-    try:
-        item_user_id = str(payload.user_id)
-        current_user_id = str(current_user.get("user_id", ""))
-
-        if not current_user_id:
-            raise HTTPException(status_code=401, detail="Unauthorized")
-        if current_user_id != item_user_id:
-            raise HTTPException(status_code=403, detail="Forbidden")
-
-        return await crud.create(payload)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to create user address: {e}"
-        )
+    return await create_user_address(payload=payload, current_user=current_user)
 
 
 @router.get(
@@ -55,17 +41,7 @@ async def list_items(
     limit: int = Query(50, ge=1, le=200),
     current_user: Dict = Depends(get_current_user),
 ):
-    try:
-        # enforce scoping to the current user (stored as ObjectId in DB)
-        user_oid = ObjectId(str(current_user["user_id"]))
-        q: Dict[str, Any] = {"user_id": user_oid}
-        return await crud.list_all(skip=skip, limit=limit, query=q)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to list user addresses: {e}"
-        )
+    return await list_user_addresses(skip=skip, limit=limit, current_user=current_user)
 
 
 @router.get(
@@ -77,21 +53,7 @@ async def get_item(
     item_id: PyObjectId,
     current_user: Dict = Depends(get_current_user),
 ):
-    try:
-        item = await crud.get_one(item_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="User address not found")
-
-        if str(item.user_id) != str(current_user["user_id"]):
-            raise HTTPException(status_code=403, detail="Forbidden")
-
-        return item
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to get user address: {e}"
-        )
+    return await get_user_address(item_id=item_id, current_user=current_user)
 
 
 @router.put(
@@ -104,29 +66,7 @@ async def update_item(
     payload: UserAddressUpdate,
     current_user: Dict = Depends(get_current_user),
 ):
-    try:
-        if not any(v is not None for v in payload.model_dump().values()):
-            raise HTTPException(status_code=400, detail="No fields provided for update")
-
-        item = await crud.get_one(item_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="User address not found")
-
-        if str(item.user_id) != str(current_user["user_id"]):
-            raise HTTPException(status_code=403, detail="Forbidden")
-
-        updated = await crud.update_one(item_id, payload)
-        if not updated:
-            raise HTTPException(
-                status_code=404, detail="User address not found or not updated"
-            )
-        return updated
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to update user address: {e}"
-        )
+    return await update_user_address(item_id=item_id, payload=payload, current_user=current_user)
 
 
 @router.delete(
@@ -137,22 +77,6 @@ async def delete_item(
     item_id: PyObjectId,
     current_user: Dict = Depends(get_current_user),
 ):
-    try:
-        item = await crud.get_one(item_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="User address not found")
-
-        if str(item.user_id) != str(current_user["user_id"]):
-            raise HTTPException(status_code=403, detail="Forbidden")
-
-        ok = await crud.delete_one(item_id)
-        if ok is None or ok is False:
-            raise HTTPException(status_code=400, detail="Unable to delete")
-
+    ok = await delete_user_address(item_id=item_id, current_user=current_user)
+    if ok:
         return JSONResponse(status_code=200, content={"deleted": True})
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to delete user address: {e}"
-        )

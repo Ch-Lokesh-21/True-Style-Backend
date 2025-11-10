@@ -2,11 +2,29 @@ from fastapi import HTTPException
 import httpx
 from typing import Dict
 
+async def get_location_service(pincode: int) -> Dict:
+    """
+    Fetch city, state, and country for an Indian PIN code using the Postal API.
 
+    Args:
+        pincode (int): 6-digit Indian postal code.
 
-async def get_location_service(pincode: int)->Dict:
-    if pincode<100000 or pincode>999999:
+    Returns:
+        Dict: Location details containing:
+            - pincode: int
+            - city: str
+            - state: str
+            - country: str
+
+    Raises:
+        HTTPException:
+            422 – If pincode is not a valid 6-digit number.
+            500 – If external postal API fails or cannot be reached.
+            404 – If API returns no data for given pincode.
+    """
+    if pincode < 100000 or pincode > 999999:
         raise HTTPException(status_code=422, detail="Invalid Pincode")
+
     url = f"https://api.postalpincode.in/pincode/{pincode}"
 
     async with httpx.AsyncClient() as client:

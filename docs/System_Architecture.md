@@ -259,10 +259,6 @@ Example response:
 ---
 
 ## 12. Future Enhancements
-✅ Inventory and stock deduction  
-✅ Invoice PDF generation  
-✅ Webhooks for shipping provider  
-✅ Mobile notifications  
 ✅ Machine learning: trending predictions  
 
 ---
